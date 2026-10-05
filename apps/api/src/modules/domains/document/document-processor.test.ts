@@ -1,15 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-
-import {
-  buildPdfTextWithVisualDescriptions,
-  cleanParsedText,
-  htmlToMarkdownText,
-  isDecorativeImage,
-  isScannedPdfText,
-  readImageDimensions,
-  splitParentChunks,
-} from "./document-processor.js";
+import { buildPdfTextWithVisualDescriptions, isScannedPdfText } from "./parsers/pdf.parser.js";
+import { cleanParsedText } from "./parsers/cleaner.js";
+import { htmlToMarkdownText } from "./parsers/docx.parser.js";
+import { isDecorativeImage } from "./parsers/vision-ocr.js";
+import { readImageDimensions } from "./parsers/image-dimensions.js";
+import { splitParentChunks } from "./document-chunker.js";
 
 const pageBreak = (page: number): string => `[[KNOWFLOW_PAGE_BREAK:${String(page)}]]`;
 
@@ -87,11 +83,7 @@ void describe("document chunking", () => {
 
   void it("does not detect normal short sentences as headings", () => {
     const chunks = splitParentChunks(
-      [
-        "第一章 总则",
-        "普通短句",
-        "这里继续说明普通短句，不应该产生新的标题路径。",
-      ].join("\n"),
+      ["第一章 总则", "普通短句", "这里继续说明普通短句，不应该产生新的标题路径。"].join("\n"),
     );
 
     assert.equal(chunks.length, 1);
@@ -103,13 +95,9 @@ void describe("document chunking", () => {
 
   void it("fills parent chunk page ranges from page markers", () => {
     const chunks = splitParentChunks(
-      [
-        "第一章 总则",
-        "第一页正文内容。",
-        pageBreak(2),
-        "第二章 范围",
-        "第二页正文内容。",
-      ].join("\n"),
+      ["第一章 总则", "第一页正文内容。", pageBreak(2), "第二章 范围", "第二页正文内容。"].join(
+        "\n",
+      ),
     );
 
     const first = chunks[0];
@@ -125,14 +113,7 @@ void describe("document chunking", () => {
   void it("keeps page ranges granular when one long section splits across pages", () => {
     const longLine = "制度正文内容".repeat(320);
     const chunks = splitParentChunks(
-      [
-        "第一章 长章节",
-        longLine,
-        pageBreak(2),
-        longLine,
-        pageBreak(3),
-        longLine,
-      ].join("\n"),
+      ["第一章 长章节", longLine, pageBreak(2), longLine, pageBreak(3), longLine].join("\n"),
     );
 
     assert.ok(chunks.length >= 2);
@@ -195,11 +176,8 @@ void describe("document multimodal helpers", () => {
   });
 
   void it("reads PNG dimensions for decorative filtering", () => {
-    const png = Buffer.from(
-      "89504e470d0a1a0a0000000d494844520000012c000000c80802000000",
-      "hex",
-    );
+    const png = Buffer.from("89504e470d0a1a0a0000000d494844520000012c000000c80802000000", "hex");
 
-    assert.deepEqual(readImageDimensions(png, "image/png"), { width: 300, height: 200 });
+    assert.deepEqual(readImageDimensions(png), { width: 300, height: 200 });
   });
 });
