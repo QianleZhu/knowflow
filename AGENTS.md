@@ -30,35 +30,35 @@ CC 是主控、任务拆解与最终审查方，Codex 是后端工程实现负�
 
 **流程按改动大小弹性适用，不必一刀切：**
 
-- **功能/模块级改动**（新功能、跨多文件、影响契约或权限）→ 走完整流程：开分支 → 指定审查方本地审查 → PR → 用户合并。
-- **小改动**（typo、文案、小样式、单文件 bug 修复、注释）→ 不必开分支/PR，可直接在当前分支改、commit；攒批后随其他改动一起 push 即可。
-- 拿不准时，倾向轻量；真正需要留痕或影响他人基线的，才升级到完整流程。**别为每个小任务都建分支、PR、push。**
+- **默认提交路径固定为 `main → main`**：在本地 `main` 开发、提交，推送到 `origin/main`；不自动创建功能分支或 PR。
+- **功能/模块级改动**（新功能、跨多文件、影响契约或权限）→ 保留需求、契约、指定审查方本地审查和完整验证，再在 `main` 提交与推送。
+- **小改动**（typo、文案、小样式、单文件 bug 修复、注释）→ 在 `main` 轻量自查、验证后提交；按用户要求或阶段节点 push。
+- 只有用户明确要求分支、PR 或 worktree 时才采用对应流程；不要自行切换提交流程。
 
 ### 3.1 完整流程主线（功能/模块级）
 
 ```
-1. git checkout -b feat/<功能名>     # 每个功能开独立分支
-2. 负责方在分支上写代码               # CC 写 PRD/契约；Codex 写后端；Gemini 写前端
-3. 指定审查方本地审查 → 负责方改 → 干净 # ← 第一次审：抓 bug 主战场
-4. 一个功能/模块完成 → git commit     # ← 提交粒度见 3.3
-5. 多个功能/模块攒够 → git push       # ← push 节奏见 3.3
-6. gh pr create → 指定审查方在 PR 上审查 # ← 第二次审：留痕 + 把关
-7. 用户拍板 → gh pr merge 合入 main   # ← 合并权限见 6
-8. git checkout main && git pull      # 切回主干，进下一个功能
+1. git status + 确认当前为 main       # 不覆盖其他 Agent 的未提交修改
+2. 干净工作树时 git pull --ff-only origin main # 同步主干，冲突时不强推
+3. 负责方在 main 写代码              # CC 写 PRD/契约；Codex 写后端；Gemini 写前端
+4. 指定审查方本地审查 → 修正 → 验证通过 # 提交前核对需求、契约与 DoD
+5. 一个功能/模块完成 → git commit    # 提交粒度见 3.3
+6. git push origin main:main         # 默认 main → main，push 节奏见 3.3
+7. 核对远程提交与 CI → 更新任务和交接  # CI 失败须修复并重新验证
 ```
 
-典型分工序列：CC 澄清需求、写 PRD、拆后端/前端子任务并定 API 契约 → Codex 实现后端并交接契约与验证结果 → Gemini 基于真实接口实现前端并做浏览器端验证 → CC 最终验收，Codex 复核接口/权限/安全相关改动 → 用户合并 → 更新 Trellis spec 与任务状态。
+典型分工序列：CC 澄清需求、写 PRD、拆后端/前端子任务并定 API 契约 → Codex 实现后端并交接契约与验证结果 → Gemini 基于真实接口实现前端并做浏览器端验证 → CC 最终验收，Codex 复核接口/权限/安全相关改动 → 在 main 提交并推送 origin/main → 更新 Trellis spec 与任务状态。
 
-### 3.2 两次审查（都要，顺序固定）
+### 3.2 提交前本地审查
 
-代码必须**先经本地审查、改干净，才能提交**。提 PR 时代码应已是「我方认为 OK」的状态——PR 审是第二道关与留痕，不是第一次发现问题的地方。
+代码必须**先经本地审查、改干净，才能提交**。默认直接提交 main，本地审查是主要质量关卡；用户明确要求 PR 时，再补 PR 审查与合并确认。
 
-|      | 第一次审（本地，提交前）                                                                                                                  | 第二次审（PR 上，合并前）    |
-| ---- | ----------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
-| 在哪 | 本地工作树看 `git diff`                                                                                                                   | GitHub PR 看 `gh pr diff`    |
-| 目的 | 趁早抓 bug，改起来便宜                                                                                                                    | 留 review 记录 + 合并前把关  |
-| 谁审 | Codex 后端由 CC 审需求/契约闭环，涉及权限/安全时 Codex 必须先自查；Gemini 前端由 CC 审 UI/需求/DoD，Codex 只复核 API 契约、类型、权限边界 | 同左                         |
-| 工具 | CC 用 `code-review`/前端审查技能；Codex 用 `security-best-practices` 等；Gemini 用前端实现与验证技能                                      | `gh pr diff` + 把意见贴到 PR |
+|      | 本地审查（提交前）                                                                                                                                              |
+| ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 在哪 | 本地工作树看 `git diff`，提交前再核对 `git diff --cached`                                                                                                       |
+| 目的 | 抓 bug、核对需求/契约/DoD，确保只提交本次改动                                                                                                                   |
+| 谁审 | Codex 后端由 CC 审需求/契约闭环，涉及权限/安全时 Codex 必须先自查；Gemini 前端由 CC 审 UI/需求/DoD，Codex 只复核 API 契约、类型、权限边界；小改动可由负责方自查 |
+| 工具 | CC 用 `code-review`/前端审查技能；Codex 用 `security-best-practices` 等；Gemini 用前端实现与验证技能                                                            |
 
 审查方的强制职责见第 4 节「完成的定义」——审查不是只看代码好不好看，必须核对 DoD。
 
@@ -66,17 +66,17 @@ CC 是主控、任务拆解与最终审查方，Codex 是后端工程实现负�
 
 - **commit 粒度**：一个功能/模块完成就 commit 一次，一个 commit = 一个逻辑完整、可独立描述的改动单元（如「实现文档上传接口」）。不要写几行就提交，也不要把不相关功能堆进一个 commit。message 用中文 + `feat:`/`fix:`/`chore:`/`docs:` 前缀。
 - **commit 前必须本地通过 lint + type-check 与关键流程验证。**
-- **push 节奏**：commit 频繁且本地，push 成批且远程——可在分支上累积多个功能的 commit，到阶段节点一次性 push，再 `gh pr create`。需远程协作或尽早留痕时可提前 push。
+- **push 节奏**：commit 频繁且本地，push 成批且远程——可在 main 累积完整功能的 commit，到阶段节点执行 `git push origin main:main`。用户要求提交到远程时，验证通过后直接执行，不再创建分支或 PR。
 
 ### 3.4 串行交接（单机共享工作树）
 
-CC、Codex 与 Gemini 共用同一个本地工作树，同一时刻只能 checkout 一个分支，因此默认**串行、不并行**：
+CC、Codex 与 Gemini 共用同一个本地 main 工作树，因此默认**串行、不并行**：
 
-- 同一时间只有一个 Agent 在一个分支上干活（如 CC 写完 PRD/契约→交接给 Codex 写后端→交接给 Gemini 写前端→交接给 CC 审查）。
-- 切换分支会替换整个工作树文件、打断其他 Agent——不要在其他 Agent 占用工作树时切分支。
+- 同一时间只有一个 Agent 在 main 工作树干活（如 CC 写完 PRD/契约→交接给 Codex 写后端→交接给 Gemini 写前端→交接给 CC 审查）。
+- 默认保持 main，不自行创建或切换功能分支；用户明确要求切分支时，也不得打断正在占用工作树的 Agent。
 - 每次交接必须写清：当前分支、改动文件、已调用的 skills、已运行的验证命令、未验证风险、下一位 Agent 的输入与边界。
 - 下一位 Agent 接手前必须先看 `git status` 与上一位交接说明；发现脏改或边界不清，先问清楚，不要直接覆盖。
-- 确需同时改重叠区域才开 git worktree 真正并行（注意：worktree 文件夹无 `.trellis/.codex/.agents` 脚手架，Trellis 脚本须在主工作树跑）。
+- 只有用户明确要求并行或 worktree 时才创建独立工作树，并明确集成回 main 的方式（注意：worktree 文件夹无 `.trellis/.codex/.agents` 脚手架，Trellis 脚本须在主工作树跑）。
 
 ## 4. 完成的定义（Definition of Done）
 
@@ -95,12 +95,12 @@ CC、Codex 与 Gemini 共用同一个本地工作树，同一时刻只能 checko
 
 CC、Codex 与 Gemini 是三个模型，风格天然不一致；统一工具链让机器仲裁风格、让人和 AI 只审逻辑。
 
-工具链（**由 Codex 搭建与维护**，属工程配置）：ESLint（抓问题）+ Prettier（统一格式）+ TypeScript strict + husky/lint-staged（commit 前自动 lint）+ GitHub Actions CI（每个 PR 跑 `lint`+`type-check`+`build`）。冲刺期 CI 只做快、必过的检查，Playwright E2E 与覆盖率门槛暂不进 CI、本地手动跑。
+工具链（**由 Codex 搭建与维护**，属工程配置）：ESLint（抓问题）+ Prettier（统一格式）+ TypeScript strict + husky/lint-staged（commit 前自动 lint）+ GitHub Actions CI（push main 以及用户要求的 PR 跑 `lint`+`type-check`+`build`）。冲刺期 CI 只做快、必过的检查，Playwright E2E 与覆盖率门槛暂不进 CI、本地手动跑。
 
 硬规则：
 
 - **commit 前必须本地过 lint + type-check。**
-- **CI 绿灯才能合并 main**——与「用户拍板」并列的硬条件，红灯一律不合。
+- **直接 push main 前本地质量门必须通过，push 后核对 CI**；CI 失败不得声称远程验证通过，须修复后再推送。用户明确要求 PR 时，仍须 CI 绿灯和用户拍板才能合并。
 - **不许用 `eslint-disable`/`@ts-ignore`/`any` 掩盖问题**；确需豁免须在该行写明原因，审查方重点查。
 - 规范配置文件（`.eslintrc`/`.prettierrc`/`tsconfig`/CI workflow）属 Codex 工程范围，CC 不随意改规则集。
 
@@ -108,8 +108,10 @@ CC、Codex 与 Gemini 是三个模型，风格天然不一致；统一工具链�
 
 - 开始前查看当前改动；不覆盖他人未提交修改。
 - 不随意执行 destructive git 命令；不用 `git reset --hard`（除非用户明确要求）。
-- **push：谁写谁 push，只 push 自己的功能分支**（低风险，分支隔离）。
-- **合并到 main：必须由用户拍板**——不论分支谁写，AI 都不自行 `gh pr merge`。流程是「指定审查方审查 → 结论交用户 → 用户点头 → 才合并」（合并 main 高风险，影响共享主干）。
+- **默认 main → main**：谁负责改动谁提交、推送，明确执行 `git push origin main:main`；不自动开功能分支、提 PR 或切换到其他分支。
+- **用户已要求提交/推送时直接执行**：完成审查与验证后继续，不为 main 推送重复索要确认；用户指定的提交信息优先。
+- **主干同步使用快进，禁止擅自强推**：远程 main 领先时先检查差异并安全同步，不使用 force push 覆盖他人提交。
+- **分支/PR 为用户明确要求的例外流程**：若采用 PR，不自行 `gh pr merge`，仍由用户拍板；不得把例外恢复为默认流程。
 - 完成后说明 changed files 与验证结果。
 
 ## 7. Skill 路由
