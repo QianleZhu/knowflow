@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { readFile } from "node:fs/promises";
 import * as XLS from "@e965/xlsx";
+import { toParsedDocument } from "./cleaner.js";
+import { PDFParse } from "pdf-parse";
 import {
   detectDocumentUploadKind,
   detectBatchImportKind,
@@ -98,31 +100,103 @@ void describe("image-size and WebP regression", () => {
 });
 
 void describe("parser registry and shared spreadsheet regression", () => {
-  void it("parses a real PDF with page markers and unchanged parser metadata", async () => {
+  void it(
+    "converts a real text PDF to Markdown while retaining page metadata",
+    { skip: process.env["DOCLING_INTEGRATION"] !== "1" },
+    async () => {
+      const buffer = await readFile(new URL("./fixtures/text.pdf", import.meta.url));
+      const parsed = await parseDocumentBuffer(buffer, { ...context, sourceType: "pdf" });
+      assert.match(parsed.text, /Parser regression document/);
+      assert.match(parsed.text, /<!-- KNOWFLOW_PAGE_BREAK:1 -->/);
+      assert.equal(parsed.metadata.parser, "docling");
+      assert.equal(parsed.metadata.pdfPageCount, 1);
+      assert.equal(parsed.metadata.scannedPdfDetected, undefined);
+      assert.equal(parsed.metadata.visionImageCount, 0);
+      assert.equal(parsed.metadata.contentFormat, "markdown");
+      assert.equal(parsed.metadata.markdownDialect, "gfm");
+    },
+  );
+
+  void it("keeps sparse PDFs on screenshot OCR and reports its original failure", async (t) => {
+    // 模拟扫描件缺少文字和截图失败，不调用真实视觉模型；验证原有失败语义。
+    t.mock.method(PDFParse.prototype, "getText", () =>
+      Promise.resolve({
+        total: 1,
+        pages: [{ num: 1, text: "" }],
+        text: "",
+      }),
+    );
+    const screenshot = t.mock.method(PDFParse.prototype, "getScreenshot", () =>
+      Promise.resolve({
+        pages: [],
+      }),
+    );
     const buffer = await readFile(new URL("./fixtures/text.pdf", import.meta.url));
-    const parsed = await parseDocumentBuffer(buffer, { ...context, sourceType: "pdf" });
-    assert.match(parsed.text, /Parser regression document/);
-    assert.match(parsed.text, /\[\[KNOWFLOW_PAGE_BREAK:1\]\]/);
-    assert.equal(parsed.metadata.parser, "pdf-parse");
-    assert.equal(parsed.metadata.pdfPageCount, 1);
-    assert.equal(parsed.metadata.scannedPdfDetected, undefined);
-    assert.equal(parsed.metadata.visionImageCount, 0);
+    await assert.rejects(
+      parseDocumentBuffer(buffer, { ...context, sourceType: "pdf" }),
+      /扫描件 PDF 视觉 OCR 失败/,
+    );
+    assert.equal(screenshot.mock.callCount(), 1);
   });
 
-  void it("filters an embedded WebP decoration in a real DOCX without calling OCR", async () => {
-    const buffer = await readFile(new URL("./fixtures/decorative-webp.docx", import.meta.url));
-    const parsed = await parseDocumentBuffer(buffer, { ...context, sourceType: "docx" });
-    assert.match(parsed.text, /装饰图之前的正文/);
-    assert.match(parsed.text, /装饰图之后的正文/);
-    assert.equal(parsed.text.includes("KNOWFLOW_DOCX_IMAGE"), false);
-    assert.equal(parsed.metadata.parser, "mammoth");
-    assert.equal(parsed.metadata.visionImageSkippedCount, 1);
-    assert.equal(parsed.metadata.visionImageCount, 0);
-    assert.equal(parsed.metadata.visionImageFailedCount, 0);
+  void it("preserves Markdown code, nested lists, tables and numeric text during cleaning", async () => {
+    const markdown = [
+      "# 标题",
+      "",
+      "123",
+      "",
+      "- 一级",
+      "  - 二级",
+      "",
+      "```ts",
+      "const value = 1;",
+      "  // 保留代码缩进",
+      "```",
+      "",
+      "| 字段 | 内容 |",
+      "| --- | --- |",
+      "| 链接 | [示例](https://example.com) |",
+    ].join("\n");
+    const parsed = await toParsedDocument(markdown, "docling");
+    assert.match(parsed.text, /\n123\n/);
+    assert.match(parsed.text, /- 一级\n {2}- 二级/);
+    assert.match(parsed.text, /```ts\nconst value = 1;\n {2}\/\/ 保留代码缩进\n```/);
+    assert.match(parsed.text, /\[示例\]\(https:\/\/example.com\)/);
+    assert.equal(parsed.metadata.contentFormat, "markdown");
   });
+
+  void it(
+    "filters an embedded WebP decoration in a real DOCX without calling OCR",
+    { skip: process.env["DOCLING_INTEGRATION"] !== "1" },
+    async () => {
+      const buffer = await readFile(new URL("./fixtures/decorative-webp.docx", import.meta.url));
+      const parsed = await parseDocumentBuffer(buffer, { ...context, sourceType: "docx" });
+      assert.match(parsed.text, /装饰图之前的正文/);
+      assert.match(parsed.text, /装饰图之后的正文/);
+      assert.equal(parsed.text.includes("knowflow-images"), false);
+      assert.equal(parsed.metadata.parser, "docling");
+      assert.equal(parsed.metadata.visionImageSkippedCount, 1);
+      assert.equal(parsed.metadata.visionImageCount, 0);
+      assert.equal(parsed.metadata.visionImageFailedCount, 0);
+    },
+  );
+
+  void it(
+    "converts real Word headings, bold text and tables to Markdown",
+    { skip: process.env["DOCLING_INTEGRATION"] !== "1" },
+    async () => {
+      const buffer = await readFile(new URL("./fixtures/structured.docx", import.meta.url));
+      const parsed = await parseDocumentBuffer(buffer, { ...context, sourceType: "docx" });
+      assert.match(parsed.text, /^## Business Process/m);
+      assert.match(parsed.text, /\*\*Important content\*\*/);
+      assert.match(parsed.text, /\| Field\s+\| Value\s+\|/);
+      assert.match(parsed.text, /\| Owner\s+\| Team\s+\|/);
+      assert.equal(parsed.metadata.contentFormat, "markdown");
+    },
+  );
 
   void it("dispatches UTF-8 text and Markdown through the same cleaner", async () => {
-    for (const sourceType of ["txt", "markdown"] as const) {
+    for (const sourceType of ["txt"] as const) {
       const parsed = await parseDocumentBuffer(Buffer.from("# 标题\n\n正文内容\u0000"), {
         ...context,
         sourceType,

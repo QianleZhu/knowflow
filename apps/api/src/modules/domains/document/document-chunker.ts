@@ -1,6 +1,6 @@
 // 文档章节与父子片段切分。
 import {
-  PAGE_BREAK_MARKER_PREFIX,
+  hasPageMarkers,
   detectHeadingLine,
   isMarkdownTableLine,
   isListLine,
@@ -323,7 +323,7 @@ function inferBoundaryType(content: string): BoundaryType {
 // 解析页码标记并为正文行附加页码。
 function toPageAwareLines(text: string): PageAwareLine[] {
   const lines: PageAwareLine[] = [];
-  let currentPage: number | null = text.includes(PAGE_BREAK_MARKER_PREFIX) ? 1 : null;
+  let currentPage: number | null = hasPageMarkers(text) ? 1 : null;
   for (const line of text.split("\n")) {
     const marker = pageMarkerNumber(line);
     if (marker !== null) {

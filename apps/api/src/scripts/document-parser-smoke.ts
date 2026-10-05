@@ -2,7 +2,7 @@
 import "../shared/config/load-env.js";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, writeFile, unlink } from "node:fs/promises";
+import { mkdir, writeFile, unlink, readFile } from "node:fs/promises";
 import path from "node:path";
 import {
   db,
@@ -22,7 +22,22 @@ import { resolveLocalStorageRoot } from "../shared/storage/local-storage.js";
 async function main(): Promise<void> {
   const documentId = randomUUID();
   const fileId = randomUUID();
-  const storagePath = `parser-smoke-${documentId}.txt`;
+  // 按显式参数验证不同格式，统一走真实处理器与向量写入链路。
+  const sourceType = process.argv[2] ?? "txt";
+  assert.ok(sourceType === "txt" || sourceType === "pdf" || sourceType === "docx");
+  const expectedParser =
+    sourceType === "pdf"
+      ? "docling"
+      : sourceType === "docx"
+        ? "docling"
+        : "plain-text";
+  const mimeType =
+    sourceType === "pdf"
+      ? "application/pdf"
+      : sourceType === "docx"
+        ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        : "text/plain";
+  const storagePath = `parser-smoke-${documentId}.${sourceType}`;
   const storageRoot = resolveLocalStorageRoot();
   const absolutePath = path.join(storageRoot, storagePath);
   try {
@@ -34,14 +49,22 @@ async function main(): Promise<void> {
     const [uploader] = await db.select({ id: users.id }).from(users).limit(1);
     assert.ok(base && uploader, "需要有效知识库和测试用户");
     const text = `# 解析拆分验证\n\n${documentId}\n\n第一段正文。\n\n## 子章节\n\n第二段正文。`;
-    const buffer = Buffer.from(text);
+    const buffer =
+      sourceType === "txt"
+        ? Buffer.from(text)
+        : await readFile(
+            new URL(
+              `../modules/domains/document/parsers/fixtures/${sourceType === "pdf" ? "text.pdf" : "structured.docx"}`,
+              import.meta.url,
+            ),
+          );
     await mkdir(storageRoot, { recursive: true });
     await writeFile(absolutePath, buffer);
     await db.insert(files).values({
       id: fileId,
       storagePath,
       filename: storagePath,
-      fileType: "text/plain",
+      fileType: mimeType,
       fileSize: buffer.length,
       hash: createHash("sha256").update(buffer).digest("hex"),
       uploaderId: uploader.id,
@@ -50,9 +73,9 @@ async function main(): Promise<void> {
       id: documentId,
       knowledgeBaseId: base.id,
       title: "解析拆分验证",
-      sourceType: "txt",
+      sourceType,
       fileId,
-      fileType: "text/plain",
+      fileType: mimeType,
       fileSize: buffer.length,
       uploaderId: uploader.id,
       metadata: { processVersion: 2 },
@@ -65,7 +88,8 @@ async function main(): Promise<void> {
     assert.equal(document.parseStatus, "completed");
     assert.equal(document.chunkStatus, "completed");
     assert.equal(document.embeddingStatus, "completed");
-    assert.equal((document.metadata as Record<string, unknown>)["parser"], "plain-text");
+    assert.equal((document.metadata as Record<string, unknown>)["parser"], expectedParser);
+    assert.equal((document.metadata as Record<string, unknown>)["contentFormat"], "markdown");
     const parents = await db
       .select()
       .from(parentChunks)
@@ -74,8 +98,12 @@ async function main(): Promise<void> {
       .select()
       .from(childChunks)
       .where(eq(childChunks.documentId, documentId));
-    assert.equal(parents.length, 2);
-    assert.ok(children.length >= 2);
+    assert.ok(parents.length >= 1);
+    assert.ok(children.length >= 1);
+    if (sourceType === "txt") {
+      assert.equal(parents.length, 2);
+      assert.ok(children.length >= 2);
+    }
     assert.ok(
       children.every(
         (chunk) => chunk.embeddingStatus === "completed" && chunk.embedding?.length === 1024,
@@ -92,7 +120,7 @@ async function main(): Promise<void> {
     console.log(
       JSON.stringify({
         processing: "completed",
-        parser: "plain-text",
+        parser: expectedParser,
         parents: parents.length,
         children: children.length,
         embeddingDimension: 1024,

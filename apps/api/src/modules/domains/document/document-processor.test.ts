@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { buildPdfTextWithVisualDescriptions, isScannedPdfText } from "./parsers/pdf.parser.js";
 import { cleanParsedText } from "./parsers/cleaner.js";
-import { htmlToMarkdownText } from "./parsers/docx.parser.js";
 import { isDecorativeImage } from "./parsers/vision-ocr.js";
 import { readImageDimensions } from "./parsers/image-dimensions.js";
 import { splitParentChunks } from "./document-chunker.js";
@@ -144,15 +143,6 @@ void describe("document multimodal helpers", () => {
     assert.equal(isDecorativeImage(null, null), false);
   });
 
-  void it("keeps mammoth image placeholders in document order when converting HTML", () => {
-    const text = htmlToMarkdownText(
-      '<h1>标题</h1><p>第一段</p><p><img src="[[KNOWFLOW_DOCX_IMAGE:1]]" /></p><p>第二段</p>',
-    );
-
-    assert.match(text, /^# 标题/);
-    assert.match(text, /第一段\n\n\[\[KNOWFLOW_DOCX_IMAGE:1\]\]\n\n第二段/);
-  });
-
   void it("inserts PDF visual descriptions after their source pages", () => {
     const text = buildPdfTextWithVisualDescriptions(
       [
@@ -167,11 +157,11 @@ void describe("document multimodal helpers", () => {
 
     assert.match(
       text,
-      /\[\[KNOWFLOW_PAGE_BREAK:1\]\]\n\n第一页正文\n\n## PDF 第 1 页图片 Y\n\n第一页图片描述/,
+      /<!-- KNOWFLOW_PAGE_BREAK:1 -->\n\n第一页正文\n\n## PDF 第 1 页图片 Y\n\n第一页图片描述/,
     );
     assert.match(
       text,
-      /\[\[KNOWFLOW_PAGE_BREAK:2\]\]\n\n第二页正文\n\n## PDF 第 2 页图片 X\n\n第二页图片描述/,
+      /<!-- KNOWFLOW_PAGE_BREAK:2 -->\n\n第二页正文\n\n## PDF 第 2 页图片 X\n\n第二页图片描述/,
     );
   });
 

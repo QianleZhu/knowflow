@@ -1,0 +1,4 @@
+docling==2.133.0
+docling-core==2.99.0
+fastapi==0.142.2
+uvicorn==0.54.0

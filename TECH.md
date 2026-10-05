@@ -68,9 +68,9 @@
 
 ```
 ①入队认领  markParsing  → processStatus=parsing, parseStatus=parsing       (pending 5% → parsing 15%)
-②解析      parseDocument→ 按类型选解析器抽纯文本 + 元数据
+②解析      parseDocumentBuffer → 按类型选解析器，输出标准 Markdown + 元数据
           markParsed   → parseStatus=completed, processStatus=chunking
-③清洗      cleanParsedText（仅 PDF 走完整清洗，见下）
+③清洗      toParsedDocument → 按输入格式清洗，统一规范 Markdown 排版
 ④分段      replaceChunks→ 父子分段写库                                      (chunking 35%)
           markChunked  → chunkStatus=completed, processStatus=embedding
 ⑤向量化    embedChildChunks → 批量嵌入 + 写 searchVector                     (embedding 60%)
@@ -80,18 +80,21 @@
 
 `markParsing` 带**认领守卫**：只更新 `processStatus IN (pending,failed)` 且版本匹配的行，未认领到就提前返回——防并发重复处理。
 
-**① 多格式解析**（`parseDocument`，`:902-931`，每类都有真实解析库）
+**① 多格式解析**（`parsers/registry.ts` 统一分发，解析器不访问数据库）
 
 | 类型                     | 库 / 方式                                                                |
 | ------------------------ | ------------------------------------------------------------------------ |
-| PDF                      | `pdf-parse`（`PDFParse.getText()`），按换页符 `\f` 保留页码              |
-| DOCX                     | `mammoth.extractRawText`                                                 |
-| Markdown / TXT           | UTF-8 纯文本                                                             |
+| 文字型 PDF               | Docling 转逐页 Markdown，图片通过唯一标记在原位回填描述，保留页码        |
+| 扫描件 PDF               | 原 `pdf-parse` 稀疏文字检测、逐页截图与视觉 OCR，保持 20 张预算          |
+| DOCX                     | Docling 保留文字、表格与图片顺序；复用 image-size 过滤和原 OCR 回填      |
+| Markdown / TXT           | MD 使用 Docling + 图片原位回填；TXT 使用原纯文本清洗                     |
 | CSV                      | `csv-parse/sync`                                                         |
 | Excel（xlsx / 旧版 xls） | `read-excel-file` / `@e965/xlsx`，上限 `MAX_SPREADSHEET_ROWS = 10000` 行 |
 | 图片                     | 视觉模型 OCR（`callModelByUsage("ocr", ...)`，temperature 0）            |
 
-**② PDF 文本清洗**（`cleanParsedText`，`:1007-1025`）：按 `\f` 切页打 `[[KNOWFLOW_PAGE_BREAK:n]]` 标记 → 去控制字符（保留 tab/换行）→ `removeRepeatedPageChrome` 删在 ≥60% 页面重复出现的页眉页脚与独立页码 → `mergeHardWrappedLines` 合并硬换行 → 折叠多余空行。无可提取文本则抛错。
+**② 统一 Markdown 输出**（`parsers/cleaner.ts`）：转换库、表格解析器和图片 OCR 的 Markdown 仅清理控制字符，避免旧纯文本规则破坏代码、列表、表格和数字正文。扫描件继续使用原清洗规则。所有解析结果经 Prettier 统一排版，关闭代码块内部格式化，metadata 标记 `contentFormat=markdown`、`markdownDialect=gfm`。新 PDF 页码使用合法注释 `<!-- KNOWFLOW_PAGE_BREAK:n -->`，切分兼容历史方括号标记，转换告警写入 `parserWarnings`。无可提取文本则抛错。
+
+PDF/DOCX/MD 需要启动独立 Docling 薄适配服务（见 services/docling/README.md），服务失败显式报错，不回退到图片页尾追加。图片识别后只插入描述正文，不添加图片标题、不保留位置标记；图片不可用/装饰图/识别失败则移除标记并记录告警。MD 内嵌图片可直接处理，HTTPS 外链需要 DOCLING_MD_IMAGE_ORIGINS 可信来源配置，相对路径图片需要附件。扫描件不调用 Docling。
 
 **③ 父子分段**（核心，常量 `document-processor.ts:27-31`）
 

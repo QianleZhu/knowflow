@@ -54,6 +54,7 @@ Thumbs.db
 # Python 缓存
 **/__pycache__/
 **/*.pyc
+.venv-docling/
 
 # Local object storage
 storage/

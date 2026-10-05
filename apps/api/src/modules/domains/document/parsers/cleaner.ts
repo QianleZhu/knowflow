@@ -1,14 +1,17 @@
 // 正文清洗与统一解析结果封装。
 import type { ParsedDocument, ParsedDocumentExtraMetadata } from "./types.js";
+import { format } from "prettier";
 import {
   PAGE_BREAK_MARKER_PREFIX,
   detectHeadingLine,
   isMarkdownTableLine,
   isListLine,
   pageMarkerNumber,
+  hasPageMarkers,
+  formatPageMarker,
 } from "../document-text-structure.js";
 
-const CLEANER_VERSION = "document-cleaner-v1";
+const CLEANER_VERSION = "document-cleaner-v2-markdown";
 
 // 清理控制字符、重复页眉页脚和硬换行。
 export function cleanParsedText(text: string): {
@@ -39,10 +42,10 @@ function prepareRawTextForCleaning(
   text: string;
   pageInfoUnavailable: boolean;
 } {
-  if (parser !== "pdf-parse") {
+  if (parser !== "pdf-parse" && parser !== "@pdf2md/core") {
     return { text, pageInfoUnavailable: false };
   }
-  if (text.includes(PAGE_BREAK_MARKER_PREFIX)) {
+  if (hasPageMarkers(text)) {
     return { text, pageInfoUnavailable: false };
   }
   if (!text.includes("\f")) {
@@ -190,27 +193,62 @@ function isStandalonePageNumber(line: string): boolean {
 }
 
 // 统一清洗正文并生成解析时间、长度与告警元数据。
-export function toParsedDocument(
+export async function toParsedDocument(
   text: string,
   parser: ParsedDocument["metadata"]["parser"],
   extraMetadata: ParsedDocumentExtraMetadata = {},
-): ParsedDocument {
+  inputFormat: "text" | "markdown" = "markdown",
+): Promise<ParsedDocument> {
   const rawTextLength = text.length;
   const prepared = prepareRawTextForCleaning(text, parser);
-  const cleaned = cleanParsedText(prepared.text);
+  // 转换库和 OCR 的 Markdown 不再经过纯文本页眉删除、硬换行合并。
+  const cleaned =
+    inputFormat === "text" ? cleanParsedText(prepared.text) : cleanMarkdownText(prepared.text);
+  const markdown = await format(
+    cleaned.text
+      .split("\n")
+      .map((line) => {
+        const page = pageMarkerNumber(line);
+        return page === null ? line : formatPageMarker(page);
+      })
+      .join("\n"),
+    {
+      parser: "markdown",
+      proseWrap: "preserve",
+      // 仅规范外层排版，保留代码块内部原文。
+      embeddedLanguageFormatting: "off",
+      endOfLine: "lf",
+      tabWidth: 2,
+    },
+  );
 
   return {
-    text: cleaned.text,
+    text: markdown.trimEnd(),
     metadata: {
       parser,
       parsedAt: new Date().toISOString(),
-      textLength: cleaned.text.length,
+      textLength: markdown.trimEnd().length,
       rawTextLength,
-      cleanedTextLength: cleaned.text.length,
+      cleanedTextLength: markdown.trimEnd().length,
       cleanerVersion: CLEANER_VERSION,
       cleaningWarnings: cleaned.warnings,
+      contentFormat: "markdown",
+      markdownDialect: "gfm",
       ...(prepared.pageInfoUnavailable ? { pageInfoUnavailable: true as const } : {}),
       ...extraMetadata,
     },
+  };
+}
+
+// Markdown 仅去除控制字符和首尾空白，保留代码缩进、列表、表格和段落结构。
+export function cleanMarkdownText(text: string): { text: string; warnings: string[] } {
+  const normalized = text.replace(/\r\n?/g, "\n");
+  const cleaned = removeControlCharacters(normalized);
+  if (cleaned.trim().length === 0) {
+    throw new Error("文档没有可提取的文本内容");
+  }
+  return {
+    text: cleaned.replace(/^(?:[ \t]*\n)+/, "").trimEnd(),
+    warnings: cleaned.length === normalized.length ? [] : ["control_chars_removed"],
   };
 }

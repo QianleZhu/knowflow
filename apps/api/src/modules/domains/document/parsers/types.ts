@@ -5,7 +5,10 @@ export type ParsedDocument = {
   text: string;
   metadata: {
     parser:
+      | "docling"
       | "pdf-parse"
+      | "@pdf2md/core"
+      | "word-to-markdown"
       | "plain-text"
       | "mammoth"
       | "csv-parse"
@@ -22,6 +25,9 @@ export type ParsedDocument = {
     cleanedTextLength: number;
     cleanerVersion: string;
     cleaningWarnings: string[];
+    contentFormat: "markdown";
+    markdownDialect: "gfm";
+    parserWarnings?: string[];
     pageInfoUnavailable?: true;
     pdfPageCount?: number;
     scannedPdfDetected?: true;
@@ -46,6 +52,8 @@ export type ParsedDocumentExtraMetadata = Partial<
     | "cleanerVersion"
     | "cleaningWarnings"
     | "pageInfoUnavailable"
+    | "contentFormat"
+    | "markdownDialect"
   >
 >;
 

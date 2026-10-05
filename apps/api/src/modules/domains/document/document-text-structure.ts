@@ -44,14 +44,25 @@ export function isListLine(line: string): boolean {
 
 // 读取内部页码标记中的正整数页码。
 export function pageMarkerNumber(line: string): number | null {
-  const match = new RegExp(`^${escapeRegExp(PAGE_BREAK_MARKER_PREFIX)}(\\d+)\\]\\]$`).exec(
-    line.trim(),
-  );
+  // 新输出使用合法 Markdown 注释，历史片段仍兼容原有方括号标记。
+  const match =
+    /^<!-- KNOWFLOW_PAGE_BREAK:(\d+) -->$/.exec(line.trim()) ??
+    new RegExp(`^${escapeRegExp(PAGE_BREAK_MARKER_PREFIX)}(\\d+)\\]\\]$`).exec(line.trim());
   if (match === null) {
     return null;
   }
   const page = Number.parseInt(match[1] ?? "", 10);
   return Number.isInteger(page) && page > 0 ? page : null;
+}
+
+// 使用合法 HTML 注释保留 PDF 页码，渲染 Markdown 时不显示内部标记。
+export function formatPageMarker(page: number): string {
+  return `<!-- KNOWFLOW_PAGE_BREAK:${String(page)} -->`;
+}
+
+// 判断正文是否包含可识别的新旧页码标记。
+export function hasPageMarkers(text: string): boolean {
+  return text.split("\n").some((line) => pageMarkerNumber(line) !== null);
 }
 
 // 转义正则表达式中的特殊字符。

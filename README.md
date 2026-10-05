@@ -110,7 +110,7 @@ README 只保留总览；完整的「设计意图 -> 实现要点 -> 关键代�
 
 ### 前置依赖
 
-- Node.js 22+
+- Node.js 22.13+
 - pnpm 10+
 - Docker（仅用于 PostgreSQL + Redis）
 - 阿里云百炼 DashScope API Key（用于对话、Embedding、Rerank、知识生产；图片 OCR 需额外配置 OCR 用途模型）
@@ -250,7 +250,7 @@ pnpm --filter @knowflow/api worker
 
 ### 图片 OCR 不工作
 
-图片解析依赖模型配置中的 `ocr` 用途模型。seed 默认配置了对话、Embedding、Rerank、知识生产等用途，但 OCR 可能需要在模型配置后台单独启用。
+PDF（文字型）、DOCX、MD 需要启动 [Docling 解析适配服务](services/docling/README.md)，将图片描述回填到原位置。图片解析依赖模型配置中的 `ocr` 用途模型。seed 默认配置了对话、Embedding、Rerank、知识生产等用途，但 OCR 可能需要在模型配置后台单独启用。
 
 **支持的图片场景**：整图上传（PNG/JPG）、扫描件 PDF（逐页渲染 OCR）、PDF 内嵌图片、DOCX 内嵌图片。
 

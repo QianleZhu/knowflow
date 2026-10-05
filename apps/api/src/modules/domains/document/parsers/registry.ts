@@ -49,7 +49,8 @@ export const DOCUMENT_CAPABILITIES: readonly DocumentCapability[] = [
     // 按格式规则验证上传内容。
     magic: (buffer) => isLikelyText(buffer),
     // 延迟加载具体解析器，上传请求不加载解析运行时。
-    parse: async (buffer) => (await import("./text.parser.js")).parseTextDocument(buffer),
+    parse: async (buffer, context) =>
+      (await import("./text.parser.js")).parseTextDocument(buffer, context),
   },
   {
     sourceType: "txt",
@@ -59,7 +60,8 @@ export const DOCUMENT_CAPABILITIES: readonly DocumentCapability[] = [
     // 按格式规则验证上传内容。
     magic: (buffer) => isLikelyText(buffer),
     // 延迟加载具体解析器，上传请求不加载解析运行时。
-    parse: async (buffer) => (await import("./text.parser.js")).parseTextDocument(buffer),
+    parse: async (buffer, context) =>
+      (await import("./text.parser.js")).parseTextDocument(buffer, context),
   },
   {
     sourceType: "docx",
