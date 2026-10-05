@@ -386,10 +386,15 @@ export const documentSchema = z.object({
   errorMessage: z.string().nullable(),
   parentChunkCount: z.number().int().nonnegative(),
   childChunkCount: z.number().int().nonnegative(),
+  processVersion: z.number().int().nonnegative().optional(),
   tags: z.array(tagSchema),
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),
 });
+
+// 上传响应兼容原文档字段，并标记是否复用了已有内容。
+export const documentUploadSchema = documentSchema.extend({ reused: z.boolean() });
+export type DocumentUploadResult = z.infer<typeof documentUploadSchema>;
 
 export const documentListResponseSchema = z.object({
   items: z.array(documentSchema),
@@ -420,7 +425,24 @@ export const documentProgressEventSchema = z.object({
   percent: z.number().int().min(0).max(100),
   message: z.string(),
   timestamp: z.iso.datetime(),
+  processVersion: z.number().int().nonnegative().optional(),
+  updatedAt: z.iso.datetime().optional(),
+  parseStatus: documentProcessStatusSchema.optional(),
+  chunkStatus: documentProcessStatusSchema.optional(),
+  embeddingStatus: z.enum(["pending", "embedding", "completed", "failed"]).optional(),
+  parentChunkCount: z.number().int().nonnegative().optional(),
+  childChunkCount: z.number().int().nonnegative().optional(),
+  failedStage: documentProcessStatusSchema.optional(),
 });
+
+// 限制一次共享订阅的文档数量，防止进度查询消耗无界资源。
+export const documentProgressSubscriptionSchema = z.object({
+  ids: z
+    .string()
+    .transform((value) => value.split(","))
+    .pipe(z.array(z.uuid()).min(1).max(50)),
+});
+export const documentProgressListSchema = z.array(documentProgressEventSchema);
 
 export const documentContentResponseSchema = z.object({
   documentId: z.uuid(),

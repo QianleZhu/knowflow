@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  Headers,
   Inject,
   InternalServerErrorException,
   MessageEvent,
@@ -26,12 +27,16 @@ import {
   documentListResponseSchema,
   documentListQuerySchema,
   documentProgressEventSchema,
+  documentProgressSubscriptionSchema,
+  documentProgressListSchema,
+  documentUploadSchema,
   documentSchema,
   uuidParamSchema,
   type DocumentChunksResponse,
   type DocumentContentResponse,
   type DocumentListResponse,
   type KnowledgeDocument,
+  type DocumentUploadResult,
 } from "@knowflow/shared";
 import type {} from "multer";
 import { Observable } from "rxjs";
@@ -99,14 +104,48 @@ export class DocumentController {
       },
     }),
   )
+  // 保留单文件接口，通过可选幂等请求头支持安全重试。
   async upload(
     @Param() params: unknown,
     @UploadedFile() file: Express.Multer.File | undefined,
     @Req() request: AuthenticatedRequest,
-  ): Promise<DocumentSuccess> {
+    @Headers("idempotency-key") header?: string,
+  ): Promise<{ ok: true; data: DocumentUploadResult }> {
     const { id } = uuidParamSchema.parse(params);
-    const data = await this.documentService.upload(id, file, this.requireUser(request));
-    return { ok: true, data: documentSchema.parse(data) };
+    const key = header === undefined ? undefined : uuidParamSchema.parse({ id: header }).id;
+    const data = await this.documentService.upload(id, file, this.requireUser(request), key);
+    return { ok: true, data: documentUploadSchema.parse(data) };
+  }
+
+  // 多份文档共享一条 SSE 连接，避免批量上传耗尽浏览器连接数。
+  @Sse("knowledge-bases/:id/documents/progress")
+  async batchProgress(
+    @Param() params: unknown,
+    @Query() query: unknown,
+    @Req() request: AuthenticatedRequest,
+  ): Promise<Observable<MessageEvent>> {
+    const { id } = uuidParamSchema.parse(params);
+    const { ids } = documentProgressSubscriptionSchema.parse(query);
+    const user = this.requireUser(request);
+    await this.documentService.getProgressSnapshots(id, ids, user);
+    return this.documentService.createBatchProgressStream(id, ids, user);
+  }
+
+  // SSE 断线时通过同一权限边界查询完整进度快照。
+  @Get("knowledge-bases/:id/documents/progress-snapshot")
+  async progressSnapshot(
+    @Param() params: unknown,
+    @Query() query: unknown,
+    @Req() request: AuthenticatedRequest,
+  ) {
+    const { id } = uuidParamSchema.parse(params);
+    const { ids } = documentProgressSubscriptionSchema.parse(query);
+    const data = await this.documentService.getProgressSnapshots(
+      id,
+      ids,
+      this.requireUser(request),
+    );
+    return { ok: true, data: documentProgressListSchema.parse(data) };
   }
 
   @Get("knowledge-bases/:id/documents")

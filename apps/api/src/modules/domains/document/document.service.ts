@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Inject,
   Injectable,
@@ -9,6 +10,8 @@ import {
   childChunks,
   db,
   documentTags,
+  documentUploadContents,
+  documentUploadRequests,
   documents,
   files,
   knowledgeBases,
@@ -29,6 +32,7 @@ import type {
   DocumentListQuery,
   DocumentListResponse,
   DocumentProgressEvent,
+  DocumentUploadResult,
   KnowledgeTag,
   KnowledgeDocument,
 } from "@knowflow/shared";
@@ -54,6 +58,7 @@ import { mkdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type {} from "multer";
 import { Observable } from "rxjs";
+import { documentProgressEventSchema } from "@knowflow/shared";
 
 import type { AuthenticatedUser } from "../auth/auth.types.js";
 import { AnalyticsEventService } from "../analytics/analytics-event.service.js";
@@ -66,7 +71,11 @@ import {
 import { resolveLocalStorageRoot } from "../../../shared/storage/local-storage.js";
 import { KnowledgeBaseAccessService } from "../knowledge-base/knowledge-base-access.service.js";
 import { createDocumentQueue } from "./document-queue.js";
-import { createRedisClient, getDocumentProgressChannel } from "./document-progress.js";
+import {
+  createRedisClient,
+  getDocumentProgressChannel,
+  loadDocumentProgressSnapshot,
+} from "./document-progress.js";
 
 type UploadedFile = Express.Multer.File;
 type FileKind = DocumentUploadKind;
@@ -135,11 +144,13 @@ export class DocumentService {
     private readonly analytics: AnalyticsEventService,
   ) {}
 
+  // 上传前校验权限，以幂等键和内容锁保证重试与并发请求只创建一份文档。
   async upload(
     knowledgeBaseId: string,
     file: UploadedFile | undefined,
     user: AuthenticatedUser,
-  ): Promise<KnowledgeDocument> {
+    idempotencyKey?: string,
+  ): Promise<DocumentUploadResult> {
     await this.ensureCanManage(knowledgeBaseId, user);
     if (file === undefined) {
       throw new BadRequestException("请上传文档文件");
@@ -152,72 +163,120 @@ export class DocumentService {
     }
 
     const kind = this.detectFileKind(file);
-    const storagePath = await this.storeFile(knowledgeBaseId, file, kind.extension);
     const hash = createHash("sha256").update(file.buffer).digest("hex");
     const originalFilename = this.decodeMultipartFilename(file.originalname);
     const title = this.normalizeTitle(originalFilename);
 
-    let createdDocumentId: string | undefined;
-    let createdFileId: string | undefined;
+    let storagePath: string | undefined;
+    let committed = false;
     try {
-      const [created] = await db.transaction(async (tx) => {
-        const [storedFile] = await tx
-          .insert(files)
-          .values({
-            storagePath,
-            filename: originalFilename,
-            fileType: file.mimetype,
-            fileSize: file.size,
-            hash,
-            uploaderId: user.id,
-          })
-          .returning({ id: files.id });
-        if (storedFile === undefined) {
-          throw new BadRequestException("保存文件元数据失败");
+      const result = await db.transaction(async (tx) => {
+        if (idempotencyKey !== undefined) {
+          // 先锁操作键，再锁文件内容；所有上传遵循同一顺序以避免死锁。
+          await tx.execute(
+            sql`select pg_advisory_xact_lock(hashtextextended(${`upload-key:${user.id}:${knowledgeBaseId}:${idempotencyKey}`}, 0))`,
+          );
+          const [request] = await tx
+            .select()
+            .from(documentUploadRequests)
+            .where(
+              and(
+                eq(documentUploadRequests.userId, user.id),
+                eq(documentUploadRequests.knowledgeBaseId, knowledgeBaseId),
+                eq(documentUploadRequests.key, idempotencyKey),
+              ),
+            )
+            .limit(1);
+          if (request !== undefined) {
+            if (request.hash !== hash) throw new ConflictException("同一幂等键不能用于不同文件");
+            return { id: request.documentId, reused: true };
+          }
         }
-        createdFileId = storedFile.id;
+        await tx.execute(
+          sql`select pg_advisory_xact_lock(hashtextextended(${`upload-content:${knowledgeBaseId}:${hash}`}, 0))`,
+        );
+        const [registered] = await tx
+          .select()
+          .from(documentUploadContents)
+          .where(
+            and(
+              eq(documentUploadContents.knowledgeBaseId, knowledgeBaseId),
+              eq(documentUploadContents.hash, hash),
+            ),
+          )
+          .limit(1);
+        // 兼容历史文件：第一次重复上传时登记原文档，不删除既有业务数据。
+        const [legacy] =
+          registered === undefined
+            ? await tx
+                .select({ id: documents.id })
+                .from(documents)
+                .innerJoin(files, eq(files.id, documents.fileId))
+                .where(and(eq(documents.knowledgeBaseId, knowledgeBaseId), eq(files.hash, hash)))
+                .orderBy(asc(documents.createdAt), asc(documents.id))
+                .limit(1)
+            : [];
+        let documentId = registered?.documentId ?? legacy?.id;
+        const reused = documentId !== undefined;
+        if (documentId === undefined) {
+          storagePath = await this.storeFile(knowledgeBaseId, file, kind.extension);
+          const [storedFile] = await tx
+            .insert(files)
+            .values({
+              storagePath,
+              filename: originalFilename,
+              fileType: file.mimetype,
+              fileSize: file.size,
+              hash,
+              uploaderId: user.id,
+            })
+            .returning({ id: files.id });
+          if (storedFile === undefined) {
+            throw new BadRequestException("保存文件元数据失败");
+          }
 
-        const [document] = await tx
-          .insert(documents)
-          .values({
-            knowledgeBaseId,
-            title,
-            sourceType: kind.sourceType,
-            sourceUri: storagePath,
-            fileId: storedFile.id,
-            fileType: file.mimetype,
-            fileSize: file.size,
-            uploaderId: user.id,
-            processStatus: "pending",
-            parseStatus: "pending",
-            chunkStatus: "pending",
-            embeddingStatus: "pending",
-            metadata: { processVersion: 1 },
-          })
-          .returning({ id: documents.id });
-        if (document === undefined) {
-          throw new BadRequestException("创建文档失败");
+          const [document] = await tx
+            .insert(documents)
+            .values({
+              knowledgeBaseId,
+              title,
+              sourceType: kind.sourceType,
+              sourceUri: storagePath,
+              fileId: storedFile.id,
+              fileType: file.mimetype,
+              fileSize: file.size,
+              uploaderId: user.id,
+              processStatus: "pending",
+              parseStatus: "pending",
+              chunkStatus: "pending",
+              embeddingStatus: "pending",
+              metadata: { processVersion: 1 },
+            })
+            .returning({ id: documents.id });
+          if (document === undefined) {
+            throw new BadRequestException("创建文档失败");
+          }
+          documentId = document.id;
         }
-        createdDocumentId = document.id;
-
-        return [document];
+        if (registered === undefined) {
+          await tx.insert(documentUploadContents).values({ knowledgeBaseId, hash, documentId });
+        }
+        if (idempotencyKey !== undefined) {
+          await tx
+            .insert(documentUploadRequests)
+            .values({ userId: user.id, knowledgeBaseId, key: idempotencyKey, hash, documentId });
+        }
+        return { id: documentId, reused };
       });
-
-      await this.enqueueProcessJob(created.id, 1);
-
-      return await this.get(created.id, user);
+      committed = true;
+      const row = await this.findRow(result.id);
+      if (row === undefined) throw new NotFoundException("未找到文档");
+      // 提交后入队失败不撤销文档；相同键重试能够补入队，确定性任务 ID 防重复消费。
+      if (row.processStatus === "pending")
+        await this.enqueueProcessJob(result.id, this.readProcessVersion(row.metadata));
+      return { ...(await this.get(result.id, user)), reused: result.reused };
     } catch (error) {
-      if (createdDocumentId !== undefined || createdFileId !== undefined) {
-        await db.transaction(async (tx) => {
-          if (createdDocumentId !== undefined) {
-            await tx.delete(documents).where(eq(documents.id, createdDocumentId));
-          }
-          if (createdFileId !== undefined) {
-            await tx.delete(files).where(eq(files.id, createdFileId));
-          }
-        });
-      }
-      await this.removeStoredFile(storagePath);
+      if (!committed && storagePath !== undefined) await this.removeStoredFile(storagePath);
       throw error;
     }
   }
@@ -508,16 +567,93 @@ export class DocumentService {
     return this.toDocument(updated, await this.countChunks(id), tagsByDocumentId.get(id) ?? []);
   }
 
+  // 校验知识库权限和每个文档的归属，防止通过订阅 ID 读取其他知识库。
+  async getProgressSnapshots(
+    knowledgeBaseId: string,
+    documentIds: string[],
+    user: AuthenticatedUser,
+  ): Promise<DocumentProgressEvent[]> {
+    await this.ensureCanAccess(knowledgeBaseId, user);
+    const ids = [...new Set(documentIds)];
+    const rows = await db
+      .select({ id: documents.id })
+      .from(documents)
+      .innerJoin(knowledgeBases, eq(knowledgeBases.id, documents.knowledgeBaseId))
+      .where(
+        and(
+          eq(documents.knowledgeBaseId, knowledgeBaseId),
+          inArray(documents.id, ids),
+          isNull(knowledgeBases.deletedAt),
+        ),
+      );
+    if (rows.length !== ids.length) throw new NotFoundException("未找到订阅文档");
+    const snapshots = await Promise.all(ids.map((id) => loadDocumentProgressSnapshot(id)));
+    if (snapshots.some((snapshot) => snapshot === undefined))
+      throw new NotFoundException("未找到文档");
+    return snapshots.filter(
+      (snapshot): snapshot is DocumentProgressEvent => snapshot !== undefined,
+    );
+  }
+
+  // 订阅就绪后发送初始快照，周期快照兼作心跳并复核访问权限。
+  createBatchProgressStream(
+    knowledgeBaseId: string,
+    documentIds: string[],
+    user: AuthenticatedUser,
+  ): Observable<{ data: DocumentProgressEvent }> {
+    return new Observable((subscriber) => {
+      const redis = createRedisClient();
+      const ids = [...new Set(documentIds)];
+      const channels = ids.map(getDocumentProgressChannel);
+      let closed = false;
+      let querying = false;
+      // 统一处理初始与周期快照，避免查询重叠及断开后的继续推送。
+      const sendSnapshots = async () => {
+        if (closed || querying) return;
+        querying = true;
+        try {
+          const snapshots = await this.getProgressSnapshots(knowledgeBaseId, ids, user);
+          if (!subscriber.closed) snapshots.forEach((event) => subscriber.next({ data: event }));
+        } catch (error) {
+          if (!subscriber.closed) subscriber.error(error);
+        } finally {
+          querying = false;
+        }
+      };
+      redis.on("message", (channel, payload) => {
+        if (closed || !channels.includes(channel)) return;
+        try {
+          const event = documentProgressEventSchema.parse(JSON.parse(payload));
+          if (ids.includes(event.documentId)) subscriber.next({ data: event });
+        } catch (error) {
+          subscriber.error(error);
+        }
+      });
+      redis.on("error", (error) => subscriber.error(error));
+      void redis
+        .subscribe(...channels)
+        .then(sendSnapshots)
+        .catch((error: unknown) => subscriber.error(error));
+      const heartbeat = setInterval(() => void sendSnapshots(), 15_000);
+      return () => {
+        closed = true;
+        clearInterval(heartbeat);
+        redis.disconnect();
+      };
+    });
+  }
+
+  // 兼容旧客户端的一文档进度连接。
   createProgressStream(documentId: string): Observable<DocumentProgressEvent> {
     return new Observable<DocumentProgressEvent>((subscriber) => {
       const redis = createRedisClient();
       const channel = getDocumentProgressChannel(documentId);
 
-      void this.findRow(documentId).then((row) => {
-        if (row !== undefined && !subscriber.closed) {
-          subscriber.next(this.toProgressEvent(row));
-        }
-      });
+      void loadDocumentProgressSnapshot(documentId)
+        .then((event) => {
+          if (event !== undefined && !subscriber.closed) subscriber.next(event);
+        })
+        .catch((error: unknown) => subscriber.error(error));
 
       redis.on("message", (_channel, payload) => {
         if (_channel !== channel) {
@@ -931,6 +1067,7 @@ export class DocumentService {
       errorMessage: row.errorMessage,
       parentChunkCount: counts.parentChunkCount,
       childChunkCount: counts.childChunkCount,
+      processVersion: this.readProcessVersion(row.metadata),
       tags: tagItems,
       createdAt: row.createdAt.toISOString(),
       updatedAt: row.updatedAt.toISOString(),
@@ -943,49 +1080,6 @@ export class DocumentService {
       createdAt: row.createdAt.toISOString(),
       updatedAt: row.updatedAt.toISOString(),
     };
-  }
-
-  private toProgressEvent(row: DocumentRow): DocumentProgressEvent {
-    return {
-      documentId: row.id,
-      stage: row.processStatus,
-      percent: this.progressPercent(row.processStatus),
-      message: row.errorMessage ?? `文档状态：${this.processStatusLabel(row.processStatus)}`,
-      timestamp: new Date().toISOString(),
-    };
-  }
-
-  private progressPercent(status: KnowledgeDocument["processStatus"]): number {
-    switch (status) {
-      case "pending":
-        return 5;
-      case "parsing":
-        return 15;
-      case "chunking":
-        return 35;
-      case "embedding":
-        return 60;
-      case "completed":
-      case "failed":
-        return 100;
-    }
-  }
-
-  private processStatusLabel(status: KnowledgeDocument["processStatus"]): string {
-    switch (status) {
-      case "pending":
-        return "待处理";
-      case "parsing":
-        return "解析中";
-      case "chunking":
-        return "切分中";
-      case "embedding":
-        return "向量化中";
-      case "completed":
-        return "已完成";
-      case "failed":
-        return "失败";
-    }
   }
 
   private readParsedTextLength(metadata: unknown): number | undefined {

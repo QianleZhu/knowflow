@@ -436,7 +436,10 @@ export const files = pgTable(
       .references(() => users.id),
     ...createdOnly(),
   },
-  (table) => [index("files_uploader_idx").on(table.uploaderId)],
+  (table) => [
+    index("files_uploader_idx").on(table.uploaderId),
+    index("files_hash_idx").on(table.hash),
+  ],
 );
 
 export const documents = pgTable(
@@ -467,6 +470,54 @@ export const documents = pgTable(
   (table) => [
     index("documents_knowledge_base_idx").on(table.knowledgeBaseId),
     index("documents_process_status_idx").on(table.processStatus),
+  ],
+);
+
+// 登记知识库内唯一的文件内容，避免并发上传创建重复文档。
+export const documentUploadContents = pgTable(
+  "document_upload_contents",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    knowledgeBaseId: uuid("knowledge_base_id")
+      .notNull()
+      .references(() => knowledgeBases.id, { onDelete: "cascade" }),
+    hash: varchar("hash", { length: 64 }).notNull(),
+    documentId: uuid("document_id")
+      .notNull()
+      .references(() => documents.id, { onDelete: "cascade" }),
+    ...createdOnly(),
+  },
+  (table) => [
+    uniqueIndex("upload_contents_kb_hash_uidx").on(table.knowledgeBaseId, table.hash),
+    index("upload_contents_document_idx").on(table.documentId),
+  ],
+);
+
+// 保存上传操作与文档的对应关系，同一用户重试时复用原记录。
+export const documentUploadRequests = pgTable(
+  "document_upload_requests",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    knowledgeBaseId: uuid("knowledge_base_id")
+      .notNull()
+      .references(() => knowledgeBases.id, { onDelete: "cascade" }),
+    key: uuid("key").notNull(),
+    hash: varchar("hash", { length: 64 }).notNull(),
+    documentId: uuid("document_id")
+      .notNull()
+      .references(() => documents.id, { onDelete: "cascade" }),
+    ...createdOnly(),
+  },
+  (table) => [
+    uniqueIndex("upload_requests_user_kb_key_uidx").on(
+      table.userId,
+      table.knowledgeBaseId,
+      table.key,
+    ),
+    index("upload_requests_document_idx").on(table.documentId),
   ],
 );
 

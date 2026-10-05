@@ -20,7 +20,7 @@ async function bootstrap(): Promise<void> {
   app.enableCors({
     origin: process.env["WEB_ORIGIN"] ?? "http://localhost:3000",
     credentials: true,
-    allowedHeaders: ["Content-Type", CSRF_HEADER_NAME],
+    allowedHeaders: ["Content-Type", CSRF_HEADER_NAME, "Idempotency-Key"],
   });
   app.use(csrfMiddleware);
   app.useGlobalPipes(

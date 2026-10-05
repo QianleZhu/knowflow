@@ -193,7 +193,6 @@ export async function processDocument(documentJobId: string): Promise<DocumentPr
       };
     }
 
-    await publishProgress(document.id, "pending", 5, "文档处理已进入队列");
     await publishProgress(document.id, "parsing", 15, "正在解析文档文本");
     const parsed = await parseDocument(document);
     await markParsed(document.id, parsed, processVersion);
@@ -302,6 +301,7 @@ async function markParsing(documentId: string, processVersion: number): Promise<
       chunkStatus: "pending",
       embeddingStatus: "pending",
       errorMessage: null,
+      metadata: sql`${documents.metadata} - 'failedStage'`,
       updatedAt: new Date(),
     })
     .where(
@@ -377,6 +377,7 @@ async function markCompleted(documentId: string, processVersion: number): Promis
   );
 }
 
+// 只标记正在执行的阶段失败，保留已经完成的解析和切分结果。
 async function markFailed(
   documentId: string,
   error: unknown,
@@ -390,9 +391,10 @@ async function markFailed(
     .update(documents)
     .set({
       processStatus: "failed",
-      parseStatus: "failed",
-      chunkStatus: "failed",
-      embeddingStatus: "failed",
+      parseStatus: sql`case when ${documents.parseStatus} = 'parsing' then 'failed'::process_status else ${documents.parseStatus} end`,
+      chunkStatus: sql`case when ${documents.chunkStatus} = 'chunking' then 'failed'::process_status else ${documents.chunkStatus} end`,
+      embeddingStatus: sql`case when ${documents.embeddingStatus} = 'embedding' then 'failed'::embedding_status else ${documents.embeddingStatus} end`,
+      metadata: sql`${documents.metadata} || jsonb_build_object('failedStage', ${documents.processStatus})`,
       errorMessage: error instanceof Error ? error.message : "文档处理失败",
       updatedAt: new Date(),
     })
@@ -1052,9 +1054,9 @@ async function parsePdfDocument(buffer: Buffer): Promise<ParsedDocument> {
     const pageCount = Math.max(result.total, result.pages.length, 1);
     const markedText = markPdfPages(result.pages);
     const scannedPdfDetected = isScannedPdfText(markedText, pageCount);
-      const visualTexts = scannedPdfDetected
-        ? await describePdfPageScreenshots(parser, pageCount, stats)
-        : await describePdfEmbeddedImages(parser, stats);
+    const visualTexts = scannedPdfDetected
+      ? await describePdfPageScreenshots(parser, pageCount, stats)
+      : await describePdfEmbeddedImages(parser, stats);
     if (scannedPdfDetected && visualTexts.length === 0) {
       throw new Error("扫描件 PDF 视觉 OCR 失败，请检查 OCR 模型配置后重试");
     }
