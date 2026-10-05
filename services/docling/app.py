@@ -2,6 +2,7 @@
 import base64
 import hmac
 import os
+import re
 from io import BytesIO
 from threading import Lock
 from uuid import uuid4
@@ -16,6 +17,8 @@ from docling_core.transforms.serializer.markdown import MarkdownDocSerializer, M
 from docling_core.transforms.serializer.common import create_ser_result
 
 MAX_BYTES = 50 * 1024 * 1024
+# 无编号的分页标记，序列化后按出现顺序补上页码。
+PAGE_BREAK_PLACEHOLDER = "<!-- KNOWFLOW_PAGE_BREAK -->"
 app = FastAPI(title="Knowflow Docling adapter")
 conversion_lock = Lock()
 pdf_options = PdfPipelineOptions(do_ocr=False, generate_picture_images=True)
@@ -45,6 +48,20 @@ class IndexedPictureSerializer(MarkdownPictureSerializer):
         return create_ser_result(text=image_placeholder.replace("{index}", index), span_source=item)
 
 
+# 分页标记落在两页之间，因此第 n 个标记代表第 n+1 页，开头另补第 1 页。
+def number_page_breaks(markdown: str) -> str:
+    counter = 1
+
+    def replace(_match: re.Match[str]) -> str:
+        nonlocal counter
+        counter += 1
+        return f"<!-- KNOWFLOW_PAGE_BREAK:{counter} -->"
+
+    return f"<!-- KNOWFLOW_PAGE_BREAK:1 -->\n\n" + re.sub(
+        re.escape(PAGE_BREAK_PLACEHOLDER), replace, markdown
+    )
+
+
 # 仅返回健康状态，不暴露模型或运行配置。
 @app.get("/health")
 def health():
@@ -71,16 +88,19 @@ def convert(request: ConvertRequest, x_api_key: str | None = Header(default=None
         doc = result.document
         nonce = uuid4().hex
         placeholder = f"<!-- KNOWFLOW_IMAGE:{nonce}:{{index}} -->"
-        params = MarkdownParams(image_placeholder=placeholder)
-        # PDF 使用来源页码过滤导出；Word/MD 不制造物理页码。
-        page_numbers = sorted(doc.pages) if request.format == "pdf" else [None]
-        pages = []
-        for number in page_numbers:
-            serializer = MarkdownDocSerializer(
-                doc=doc, picture_serializer=IndexedPictureSerializer(),
-                params=params.model_copy(update={"pages": {number}}) if number is not None else params,
-            )
-            pages.append({"pageNumber": number, "markdown": serializer.serialize().text})
+        # 一次序列化整篇：逐页序列化会把同一棵树重建上百次，实测慢两个数量级。
+        # PDF 用原生分页标记保留页码；Word/MD 不制造物理页码。
+        is_pdf = request.format == "pdf"
+        params = MarkdownParams(
+            image_placeholder=placeholder,
+            page_break_placeholder=PAGE_BREAK_PLACEHOLDER if is_pdf else None,
+        )
+        serializer = MarkdownDocSerializer(
+            doc=doc, picture_serializer=IndexedPictureSerializer(), params=params
+        )
+        markdown = serializer.serialize().text
+        if is_pdf:
+            markdown = number_page_breaks(markdown)
         images = []
         warnings = []
         for picture in doc.pictures:
@@ -95,4 +115,10 @@ def convert(request: ConvertRequest, x_api_key: str | None = Header(default=None
                 images.append({"marker": marker, "base64": base64.b64encode(output.getvalue()).decode("ascii")})
             except (ValueError, OSError):
                 warnings.append("docling_image_extract_failed")
-        return {"nonce": nonce, "pages": pages, "images": images, "warnings": sorted(set(warnings))}
+        return {
+            "nonce": nonce,
+            "pages": [{"pageNumber": None, "markdown": markdown}],
+            "pageCount": len(doc.pages) if is_pdf else None,
+            "images": images,
+            "warnings": sorted(set(warnings)),
+        }

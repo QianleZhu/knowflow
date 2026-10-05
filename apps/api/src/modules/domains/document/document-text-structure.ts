@@ -37,6 +37,11 @@ export function isMarkdownTableLine(line: string): boolean {
   return /^\|.*\|$/.test(line.trim());
 }
 
+// 判断是否为 Markdown 表格的分隔行（如 | --- | :---: |）。
+export function isMarkdownTableSeparatorLine(line: string): boolean {
+  return /^\|(?:\s*:?-{2,}:?\s*\|)+$/.test(line.trim());
+}
+
 // 识别有序与无序列表行。
 export function isListLine(line: string): boolean {
   return /^(\s*[-*+]\s+|\s*\d+[.)、]\s+|\s*[（(]?[一二三四五六七八九十]+[）).、]\s+)/.test(line);

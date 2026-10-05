@@ -16,6 +16,8 @@ import {
 export type DoclingResult = {
   nonce: string;
   pages: { pageNumber: number | null; markdown: string }[];
+  // 一次序列化整篇后页码不再按页拆分，由适配层单独给出总页数；旧版本没有此字段。
+  pageCount?: number | null;
   images: { marker: string; base64: string }[];
   warnings: string[];
 };
@@ -68,6 +70,13 @@ function validateResult(value: unknown): DoclingResult {
       throw new Error("Docling 返回了无效图片资源");
     }
   }
+  const pageCount = result["pageCount"];
+  if (
+    pageCount !== undefined &&
+    pageCount !== null &&
+    (!Number.isSafeInteger(pageCount) || (pageCount as number) < 1)
+  )
+    throw new Error("Docling 返回了无效页数");
   if (!(result["warnings"] as unknown[]).every((warning) => typeof warning === "string"))
     throw new Error("Docling 告警格式错误");
   return value as DoclingResult;
@@ -197,7 +206,7 @@ export async function backfillDoclingImages(
     );
   }
   return toParsedDocument(pages.join("\n\n"), "docling", {
-    ...(format === "pdf" ? { pdfPageCount: result.pages.length } : {}),
+    ...(format === "pdf" ? { pdfPageCount: result.pageCount ?? result.pages.length } : {}),
     ...(format === "docx" ? { originalFormat: "docx" as const } : {}),
     ...visionStatsMetadata(stats),
     ...(result.warnings.length > 0 ? { parserWarnings: [...new Set(result.warnings)] } : {}),

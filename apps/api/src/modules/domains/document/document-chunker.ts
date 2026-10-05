@@ -3,6 +3,7 @@ import {
   hasPageMarkers,
   detectHeadingLine,
   isMarkdownTableLine,
+  isMarkdownTableSeparatorLine,
   isListLine,
   pageMarkerNumber,
   stripPageMarkers,
@@ -16,7 +17,7 @@ const CHILD_TARGET_CHARS = 900;
 
 const CHILD_OVERLAP_CHARS = 120;
 
-export const CHUNKER_VERSION = "semantic-chunker-v1";
+export const CHUNKER_VERSION = "semantic-chunker-v2";
 
 type BoundaryType = "heading" | "table" | "list" | "paragraph" | "sentence" | "length";
 
@@ -141,7 +142,7 @@ function splitHeadingSections(text: string): ParentChunkInput[] {
 
 // 生成带重叠上下文的子片段。
 export function splitChildChunks(content: string): ChildChunkInput[] {
-  return splitByLength(content, CHILD_TARGET_CHARS, CHILD_OVERLAP_CHARS).map((chunk, index) => ({
+  return splitChildContent(content).map((chunk, index) => ({
     content: chunk,
     chunkIndex: index,
     tokenCount: estimateTokenCount(chunk),
@@ -175,7 +176,9 @@ function splitSemanticParentLines(lines: PageAwareLine[]): SemanticParentPiece[]
   for (const block of blocks) {
     const pieces =
       block.content.length > PARENT_MAX_CHARS
-        ? splitBlockBySentenceThenLength(block, PARENT_TARGET_CHARS, PARENT_MAX_CHARS)
+        ? block.boundaryType === "table"
+          ? splitTableBlock(block)
+          : splitBlockBySentenceThenLength(block, PARENT_TARGET_CHARS, PARENT_MAX_CHARS)
         : [block.lines];
     for (const piece of pieces) {
       if (currentLines.length === 0) {
@@ -300,6 +303,91 @@ function splitBlockBySentenceThenLength(
   );
 }
 
+// 提取 Markdown 表格的表头行（首行 + 分隔行；无分隔行时仅首行）。
+function extractTableHeader(lines: PageAwareLine[]): PageAwareLine[] {
+  const first = lines[0];
+  if (first === undefined || !isMarkdownTableLine(first.text)) {
+    return [];
+  }
+  const second = lines[1];
+  if (second !== undefined && isMarkdownTableSeparatorLine(second.text)) {
+    return [first, second];
+  }
+  return [first];
+}
+
+// 按行拆分超长表格块并为每个片段补表头，保证数据行不被截断。
+function splitTableBlock(block: TextBlock): PageAwareLine[][] {
+  const header = extractTableHeader(block.lines);
+  const headerChars = header.reduce((sum, line) => sum + line.text.length + 1, 0);
+  const pieces: PageAwareLine[][] = [];
+  let current: PageAwareLine[] = [];
+  let currentChars = headerChars;
+
+  function flush(): void {
+    if (current.length > 0) {
+      pieces.push([...header, ...current]);
+    }
+    current = [];
+    currentChars = headerChars;
+  }
+
+  for (const line of block.lines.slice(header.length)) {
+    const lineChars = line.text.length + 1;
+    if (current.length > 0 && currentChars + lineChars > PARENT_TARGET_CHARS) {
+      flush();
+    }
+    current.push(line);
+    currentChars += lineChars;
+  }
+  flush();
+
+  return pieces;
+}
+
+// 纯表格内容按行切分并补表头（表头即上下文，不做重叠），其余内容沿用长度切分。
+function splitChildContent(content: string): string[] {
+  const normalized = content.trim();
+  if (normalized.length <= CHILD_TARGET_CHARS) {
+    return splitByLength(normalized, CHILD_TARGET_CHARS, CHILD_OVERLAP_CHARS);
+  }
+  const lines: PageAwareLine[] = normalized.split("\n").map((text) => ({ text, page: null }));
+  const isPureTable = lines.every(
+    (line) => line.text.trim().length === 0 || isMarkdownTableLine(line.text),
+  );
+  const header = isPureTable ? extractTableHeader(lines) : [];
+  if (header.length === 0) {
+    return splitByLength(normalized, CHILD_TARGET_CHARS, CHILD_OVERLAP_CHARS);
+  }
+  const headerTexts = header.map((line) => line.text);
+  const headerChars = headerTexts.reduce((sum, text) => sum + text.length + 1, 0);
+  const chunks: string[] = [];
+  let current: string[] = [];
+  let currentChars = headerChars;
+
+  function flush(): void {
+    if (current.length > 0) {
+      //表投行+子表+换行符拼接
+      chunks.push([...headerTexts, ...current].join("\n").trim());
+    }
+    current = [];
+    currentChars = headerChars;
+  }
+
+  for (const line of lines.slice(header.length)) {
+    const lineChars = line.text.length + 1;
+    if (currentChars + lineChars > CHILD_TARGET_CHARS) {
+      flush();
+    }
+    //以航为单位进行累加
+    current.push(line.text);
+    currentChars += lineChars;
+  }
+  flush();
+
+  return chunks;
+}
+
 // 识别标题、表格、列表和普通段落。
 function classifyBlockLine(line: string): BoundaryType {
   if (detectHeadingLine(line) !== null) {
@@ -361,9 +449,10 @@ function splitByLength(text: string, targetChars: number, overlapChars: number):
     let end = hardEnd;
     if (hardEnd < normalized.length) {
       const newline = normalized.lastIndexOf("\n\n", hardEnd);
+      const single = normalized.lastIndexOf("\n", hardEnd);
       const sentence = normalized.lastIndexOf("\u3002", hardEnd);
       const space = normalized.lastIndexOf(" ", hardEnd);
-      const candidate = Math.max(newline, sentence, space);
+      const candidate = Math.max(newline, single, sentence, space);
       if (candidate > start + Math.floor(targetChars * 0.55)) {
         end = candidate + 1;
       }
