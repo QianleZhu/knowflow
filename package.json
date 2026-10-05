@@ -18,6 +18,8 @@
     "seed": "pnpm db:migrate && pnpm --filter @knowflow/db seed",
     "db:generate": "pnpm --filter @knowflow/db db:generate",
     "db:migrate": "pnpm --filter @knowflow/db db:migrate",
+    "test:upload": "pnpm --filter @knowflow/api exec tsx --test ../web/src/lib/upload-queue.test.ts",
+    "verify:upload": "pnpm --filter @knowflow/api exec tsx src/scripts/document-upload-smoke.ts",
     "prepare": "husky"
   },
   "devDependencies": {

@@ -177,14 +177,16 @@ pnpm build
 
 ### 常用脚本
 
-| 命令                                 | 作用                                              |
-| ------------------------------------ | ------------------------------------------------- |
-| `pnpm dev:all`                       | 一键启动 api + web + worker，推荐用于开发和演示。 |
-| `pnpm dev`                           | 仅启动 api + web，不包含 worker。                 |
-| `pnpm seed`                          | 执行迁移并写入种子数据。                          |
-| `pnpm db:migrate`                    | 仅执行数据库迁移。                                |
-| `pnpm db:generate`                   | 由 Drizzle schema 生成迁移文件。                  |
-| `pnpm --filter @knowflow/api worker` | 单独启动 Worker 进程。                            |
+| 命令                                 | 作用                                                             |
+| ------------------------------------ | ---------------------------------------------------------------- |
+| `pnpm dev:all`                       | 一键启动 api + web + worker，推荐用于开发和演示。                |
+| `pnpm dev`                           | 仅启动 api + web，不包含 worker。                                |
+| `pnpm seed`                          | 执行迁移并写入种子数据。                                         |
+| `pnpm db:migrate`                    | 仅执行数据库迁移。                                               |
+| `pnpm db:generate`                   | 由 Drizzle schema 生成迁移文件。                                 |
+| `pnpm test:upload`                   | 验证上传并发、重试次数、取消及进度版本合并。                     |
+| `pnpm verify:upload`                 | 应用和 Worker 启动后验证真实上传、去重及 SSE；自动清理测试文档。 |
+| `pnpm --filter @knowflow/api worker` | 单独启动 Worker 进程。                                           |
 
 ---
 

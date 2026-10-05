@@ -1,8 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  CSRF_HEADER_NAME,
   documentListResponseSchema,
   documentSchema,
   type KnowledgeDocument,
@@ -24,8 +23,10 @@ import {
   SelectValue,
 } from "../../../../components/ui/select";
 import { TagBadge } from "../../../../components/ui/tag-badge";
-import { apiRequest, apiUrl, emptyObjectSchema, getCsrfToken, parseApiError, replaceDocumentTags } from "../../../../lib/api";
+import { apiRequest, emptyObjectSchema, replaceDocumentTags } from "../../../../lib/api";
 import { useDocumentProgress } from "../_hooks/use-document-progress";
+import { useDocumentUpload } from "../_hooks/use-document-upload";
+import { DocumentProcessingSteps } from "./document-processing-steps";
 import { useTagFilter } from "../_hooks/use-tag-filter";
 import { useTags } from "../_hooks/use-tags";
 import { Pagination } from "./pagination";
@@ -76,7 +77,6 @@ export function TabDocuments({ knowledgeBaseId, canManage }: TabDocumentsProps) 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [isUploading, setIsUploading] = useState(false);
   const [actionSuccess, setActionSuccess] = useState<string | null>(null);
   const [extractingIds, setExtractingIds] = useState<Set<string>>(new Set());
   const [archivedMode, setArchivedMode] = useState(false);
@@ -88,7 +88,6 @@ export function TabDocuments({ knowledgeBaseId, canManage }: TabDocumentsProps) 
   const [previewTarget, setPreviewTarget] = useState<KnowledgeDocument | null>(null);
   const [tagManagerOpen, setTagManagerOpen] = useState(false);
   const [uploadOpen, setUploadOpen] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const {
@@ -148,7 +147,35 @@ export function TabDocuments({ knowledgeBaseId, canManage }: TabDocumentsProps) 
     setSelectedIds(new Set());
   }, [page, status, keyword, tagFilter.queryValue, archivedMode]);
 
-  const progressMap = useDocumentProgress(documents, () => void loadDocuments());
+  // 上传成功记录立即参与订阅，不受当前分页、搜索条件影响。
+  const refreshDocuments = useCallback(() => {
+    void loadDocuments();
+  }, [loadDocuments]);
+  const upload = useDocumentUpload(knowledgeBaseId, refreshDocuments);
+  const trackedDocuments = useMemo(() => {
+    const byId = new Map<string, KnowledgeDocument>();
+    for (const document of [...upload.uploadedDocuments, ...documents]) {
+      const previous = byId.get(document.id);
+      if (!previous || Date.parse(document.updatedAt) >= Date.parse(previous.updatedAt))
+        byId.set(document.id, document);
+    }
+    return [...byId.values()];
+  }, [documents, upload.uploadedDocuments]);
+  const { progressMap, connectionStatus } = useDocumentProgress(
+    knowledgeBaseId,
+    trackedDocuments,
+    refreshDocuments,
+  );
+  const uploadedKey = upload.uploadedDocuments
+    .map((document) => document.id)
+    .sort()
+    .join(",");
+  // 一批同时完成的上传合并刷新列表，不再关闭弹窗以保留处理步骤。
+  useEffect(() => {
+    if (!uploadedKey) return;
+    const timer = setTimeout(() => void loadDocuments(), 150);
+    return () => clearTimeout(timer);
+  }, [uploadedKey, loadDocuments]);
 
   function handleKeywordChange(value: string) {
     if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -158,52 +185,11 @@ export function TabDocuments({ knowledgeBaseId, canManage }: TabDocumentsProps) 
     }, 300);
   }
 
-  async function handleUpload() {
-    const file = fileInputRef.current?.files?.[0];
-    if (!file) {
-      setActionError("请选择文件");
-      return;
-    }
-
-    setIsUploading(true);
-    setActionError(null);
-    try {
-      const formData = new FormData();
-      formData.set("file", file);
-      const response = await fetch(
-        apiUrl(`/knowledge-bases/${knowledgeBaseId}/documents`),
-        {
-          method: "POST",
-          headers: { [CSRF_HEADER_NAME]: getCsrfToken() },
-          body: formData,
-          credentials: "include",
-        },
-      );
-      if (!response.ok) throw new Error(await parseApiError(response));
-      const body: unknown = await response.json();
-      if (typeof body !== "object" || body === null || !("ok" in body) || body.ok !== true || !("data" in body)) {
-        throw new Error("响应格式无效");
-      }
-      documentSchema.parse(body.data);
-      if (fileInputRef.current) fileInputRef.current.value = "";
-      setUploadOpen(false);
-      await loadDocuments();
-    } catch (caught) {
-      setActionError(caught instanceof Error ? caught.message : "上传失败");
-    } finally {
-      setIsUploading(false);
-    }
-  }
-
+  // 上传弹窗和列表共用解析重试，返回的新版本继续由进度 hook 跟踪。
   async function handleReprocess(docId: string) {
     setActionError(null);
     try {
-      await apiRequest(
-        `/documents/${docId}/reprocess`,
-        documentSchema,
-        { method: "POST" },
-      );
-      await loadDocuments();
+      await upload.retryProcessing(docId);
     } catch (caught) {
       setActionError(caught instanceof Error ? caught.message : "重试失败");
     }
@@ -213,20 +199,20 @@ export function TabDocuments({ knowledgeBaseId, canManage }: TabDocumentsProps) 
     if (!archiveTarget) return;
     setActionLoading(true);
     setActionError(null);
-    
+
     const results = await Promise.allSettled(
       archiveTarget.ids.map((docId) =>
-        apiRequest(`/documents/${docId}/archive`, documentSchema, { method: "POST" })
-      )
+        apiRequest(`/documents/${docId}/archive`, documentSchema, { method: "POST" }),
+      ),
     );
-    
+
     const fulfilled = results.filter((r) => r.status === "fulfilled").length;
     const rejected = results.filter((r) => r.status === "rejected").length;
 
     setArchiveTarget(null);
     setSelectedIds(new Set());
     await loadDocuments();
-    
+
     if (rejected > 0) {
       if (fulfilled === 0) {
         setActionError(`归档失败 ${String(rejected)} 个文档`);
@@ -245,20 +231,20 @@ export function TabDocuments({ knowledgeBaseId, canManage }: TabDocumentsProps) 
     if (!restoreTarget) return;
     setActionLoading(true);
     setActionError(null);
-    
+
     const results = await Promise.allSettled(
       restoreTarget.ids.map((docId) =>
-        apiRequest(`/documents/${docId}/restore`, documentSchema, { method: "POST" })
-      )
+        apiRequest(`/documents/${docId}/restore`, documentSchema, { method: "POST" }),
+      ),
     );
-    
+
     const fulfilled = results.filter((r) => r.status === "fulfilled").length;
     const rejected = results.filter((r) => r.status === "rejected").length;
 
     setRestoreTarget(null);
     setSelectedIds(new Set());
     await loadDocuments();
-    
+
     if (rejected > 0) {
       if (fulfilled === 0) {
         setActionError(`恢复失败 ${String(rejected)} 个文档`);
@@ -277,20 +263,20 @@ export function TabDocuments({ knowledgeBaseId, canManage }: TabDocumentsProps) 
     if (!deleteTarget) return;
     setActionLoading(true);
     setActionError(null);
-    
+
     const results = await Promise.allSettled(
       deleteTarget.ids.map((docId) =>
-        apiRequest(`/documents/${docId}`, emptyObjectSchema, { method: "DELETE" })
-      )
+        apiRequest(`/documents/${docId}`, emptyObjectSchema, { method: "DELETE" }),
+      ),
     );
-    
+
     const fulfilled = results.filter((r) => r.status === "fulfilled").length;
     const rejected = results.filter((r) => r.status === "rejected").length;
 
     setDeleteTarget(null);
     setSelectedIds(new Set());
     await loadDocuments();
-    
+
     if (rejected > 0) {
       if (fulfilled === 0) {
         setActionError(`删除失败 ${String(rejected)} 个文档`);
@@ -373,14 +359,19 @@ export function TabDocuments({ knowledgeBaseId, canManage }: TabDocumentsProps) 
           />
           <Select
             value={status}
-            onValueChange={(next) => { setStatus(next); setPage(1); }}
+            onValueChange={(next) => {
+              setStatus(next);
+              setPage(1);
+            }}
           >
             <SelectTrigger className="w-40">
               <SelectValue placeholder="全部状态" />
             </SelectTrigger>
             <SelectContent>
               {STATUS_OPTIONS.map((opt) => (
-                <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
+                <SelectItem key={opt.value} value={opt.value}>
+                  {opt.label}
+                </SelectItem>
               ))}
             </SelectContent>
           </Select>
@@ -402,8 +393,14 @@ export function TabDocuments({ knowledgeBaseId, canManage }: TabDocumentsProps) 
           <TagFilterPopover
             allTags={allTags}
             selectedTagIds={tagFilter.selectedTagIds}
-            onToggle={(tagId) => { tagFilter.toggle(tagId); setPage(1); }}
-            onClear={() => { tagFilter.clear(); setPage(1); }}
+            onToggle={(tagId) => {
+              tagFilter.toggle(tagId);
+              setPage(1);
+            }}
+            onClear={() => {
+              tagFilter.clear();
+              setPage(1);
+            }}
           />
         </div>
         {canManage ? (
@@ -411,7 +408,13 @@ export function TabDocuments({ knowledgeBaseId, canManage }: TabDocumentsProps) 
             <Button variant="outline" size="sm" onClick={() => setTagManagerOpen(true)}>
               管理标签
             </Button>
-            <Button size="sm" onClick={() => { setActionError(null); setUploadOpen(true); }}>
+            <Button
+              size="sm"
+              onClick={() => {
+                setActionError(null);
+                setUploadOpen(true);
+              }}
+            >
               上传文档
             </Button>
           </div>
@@ -421,11 +424,7 @@ export function TabDocuments({ knowledgeBaseId, canManage }: TabDocumentsProps) 
       {canManage && documents.length > 0 ? (
         <div className="flex items-center gap-3 px-0.5">
           <label className="flex cursor-pointer items-center gap-2 text-sm text-ink-muted">
-            <Checkbox
-              checked={allSelected}
-              onCheckedChange={() => toggleAll()}
-              aria-label="全选"
-            />
+            <Checkbox checked={allSelected} onCheckedChange={() => toggleAll()} aria-label="全选" />
             全选
           </label>
           {selectedIds.size > 0 ? (
@@ -482,8 +481,20 @@ export function TabDocuments({ knowledgeBaseId, canManage }: TabDocumentsProps) 
         </div>
       ) : documents.length === 0 ? (
         <EmptyState
-          title={tagFilter.selectedTagIds.length > 0 ? "没有符合标签筛选的文档" : (archivedMode ? "暂无已归档文档" : "暂无文档")}
-          description={tagFilter.selectedTagIds.length > 0 ? "尝试减少所选标签。" : (archivedMode ? "归档的文档将在此显示。" : "上传文档后将在此显示。")}
+          title={
+            tagFilter.selectedTagIds.length > 0
+              ? "没有符合标签筛选的文档"
+              : archivedMode
+                ? "暂无已归档文档"
+                : "暂无文档"
+          }
+          description={
+            tagFilter.selectedTagIds.length > 0
+              ? "尝试减少所选标签。"
+              : archivedMode
+                ? "归档的文档将在此显示。"
+                : "上传文档后将在此显示。"
+          }
         />
       ) : (
         <div className="flex flex-col gap-2">
@@ -537,9 +548,7 @@ export function TabDocuments({ knowledgeBaseId, canManage }: TabDocumentsProps) 
         onClose={() => setRestoreTarget(null)}
         title="确认恢复"
         description={
-          restoreTarget
-            ? `确定恢复选中的 ${String(restoreTarget.ids.length)} 个文档吗？`
-            : ""
+          restoreTarget ? `确定恢复选中的 ${String(restoreTarget.ids.length)} 个文档吗？` : ""
         }
       >
         <div className="flex justify-end gap-2 pt-4">
@@ -566,7 +575,11 @@ export function TabDocuments({ knowledgeBaseId, canManage }: TabDocumentsProps) 
           <Button variant="secondary" onClick={() => setDeleteTarget(null)}>
             取消
           </Button>
-          <Button variant="destructive" loading={actionLoading} onClick={() => void handleConfirmDelete()}>
+          <Button
+            variant="destructive"
+            loading={actionLoading}
+            onClick={() => void handleConfirmDelete()}
+          >
             彻底删除
           </Button>
         </div>
@@ -576,24 +589,116 @@ export function TabDocuments({ knowledgeBaseId, canManage }: TabDocumentsProps) 
         open={uploadOpen}
         onClose={() => setUploadOpen(false)}
         title="上传文档"
-        description="支持 PDF、Markdown、TXT、DOCX、CSV、Excel、PNG/JPG/WebP 图片。"
+        description="可多选文件，每份不超过 10 MB；最多同时上传 3 份，每份最多尝试 3 次。"
       >
         <div className="flex flex-col gap-4 pt-1">
           <input
-            ref={fileInputRef}
             type="file"
+            multiple
+            onChange={(event) => {
+              upload.addFiles(Array.from(event.currentTarget.files ?? []));
+              event.currentTarget.value = "";
+            }}
             accept=".pdf,.md,.markdown,.txt,.docx,.csv,.xls,.xlsx,.png,.jpg,.jpeg,.webp,application/pdf,text/markdown,text/plain,image/png,image/jpeg,image/webp"
             className="text-sm file:mr-3 file:rounded-md file:border-0 file:bg-brand-50 file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-brand-700 hover:file:bg-brand-100"
           />
+          <p className="text-xs text-ink-subtle">
+            已上传 {upload.tasks.filter((task) => task.status === "uploaded").length} /{" "}
+            {upload.tasks.length} 份
+            {connectionStatus !== "idle"
+              ? ` · 进度连接：${{ connecting: "连接中", connected: "已连接", reconnecting: "正在重连", polling: "轮询恢复中" }[connectionStatus]}`
+              : ""}
+          </p>
+          <div className="max-h-96 space-y-3 overflow-y-auto">
+            {upload.tasks.map((task) => (
+              <div key={task.id} className="rounded-md border border-border p-3">
+                <p className="break-all text-sm font-medium">{task.file.name}</p>
+                <p className="mt-1 text-xs text-ink-subtle">
+                  {
+                    {
+                      waiting: "待上传",
+                      queued: "排队上传",
+                      uploading: "上传中",
+                      retry_waiting: "等待自动重试",
+                      uploaded: "上传成功",
+                      failed: "上传失败",
+                      cancelled: "上传已取消",
+                    }[task.status]
+                  }
+                  {task.attempts > 0 ? ` · 已尝试 ${String(task.attempts)} / 3 次` : ""}
+                  {task.retryAt
+                    ? ` · 将于 ${new Date(task.retryAt).toLocaleTimeString()} 重试`
+                    : ""}
+                  {task.document?.reused ? " · 已关联相同内容的原文档" : ""}
+                </p>
+                {task.error && <p className="mt-1 text-xs text-danger">{task.error}</p>}
+                {task.document?.enabled === false && (
+                  <p className="mt-1 text-xs text-ink-subtle">原文档已归档，可在已归档视图恢复。</p>
+                )}
+                {task.document && (
+                  <DocumentProcessingSteps
+                    document={task.document}
+                    progress={progressMap[task.document.id]}
+                  />
+                )}
+                <div className="mt-2 flex gap-2">
+                  {(task.status === "waiting" ||
+                    (task.status === "failed" && task.attempts === 0)) && (
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      onClick={() => upload.removeTask(task.id)}
+                    >
+                      移除
+                    </Button>
+                  )}
+                  {["queued", "uploading", "retry_waiting"].includes(task.status) && (
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      onClick={() => upload.cancelUpload(task.id)}
+                    >
+                      取消上传
+                    </Button>
+                  )}
+                  {["failed", "cancelled"].includes(task.status) && task.retryable && (
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      onClick={() => upload.retryUpload(task.id)}
+                    >
+                      重新上传
+                    </Button>
+                  )}
+                  {task.document &&
+                    (progressMap[task.document.id]?.stage ?? task.document.processStatus) ===
+                      "failed" && (
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => {
+                          if (task.document) void handleReprocess(task.document.id);
+                        }}
+                      >
+                        重新处理
+                      </Button>
+                    )}
+                </div>
+              </div>
+            ))}
+          </div>
           {actionError ? (
             <p className="rounded-md bg-danger-bg px-3 py-2 text-sm text-danger">{actionError}</p>
           ) : null}
           <div className="flex justify-end gap-2 pt-1">
             <Button variant="secondary" onClick={() => setUploadOpen(false)}>
-              取消
+              关闭
             </Button>
-            <Button loading={isUploading} onClick={() => void handleUpload()}>
-              确定上传
+            <Button
+              disabled={!upload.tasks.some((task) => task.status === "waiting")}
+              onClick={upload.startUpload}
+            >
+              开始上传
             </Button>
           </div>
         </div>
@@ -608,11 +713,8 @@ export function TabDocuments({ knowledgeBaseId, canManage }: TabDocumentsProps) 
         onUpdate={updateTagFn}
         onDelete={removeTag}
       />
-      
-      <DocumentPreviewDialog 
-        doc={previewTarget} 
-        onClose={() => setPreviewTarget(null)} 
-      />
+
+      <DocumentPreviewDialog doc={previewTarget} onClose={() => setPreviewTarget(null)} />
     </div>
   );
 }
@@ -650,10 +752,8 @@ function DocumentRow({
   onExtract: (docId: string) => void;
   isExtracting: boolean;
 }) {
-  const percent = progress?.percent ?? statusPercent(doc.processStatus);
-  const message = progress?.message ?? doc.errorMessage ?? statusLabels[doc.processStatus] ?? doc.processStatus;
-  const tone = statusBadgeTone[doc.processStatus] ?? "neutral";
-  const isActive = !["completed", "failed"].includes(doc.processStatus);
+  const stage = progress?.stage ?? doc.processStatus;
+  const tone = statusBadgeTone[stage] ?? "neutral";
 
   return (
     <div className="flex items-center gap-4 rounded-lg border border-border bg-surface px-4 py-3 transition-colors hover:border-brand-200">
@@ -672,7 +772,9 @@ function DocumentRow({
         {/* 已返回但此前未展示的字段：分块数 + 创建/更新时间（M5） */}
         <p className="text-xs text-ink-subtle mt-0.5 tabular-nums">
           {doc.processStatus === "completed" ? (
-            <>父块 {doc.parentChunkCount} · 子块 {doc.childChunkCount} · </>
+            <>
+              父块 {doc.parentChunkCount} · 子块 {doc.childChunkCount} ·{" "}
+            </>
           ) : null}
           上传 {formatDate(doc.createdAt)}
           {doc.updatedAt !== doc.createdAt ? <> · 更新 {formatDate(doc.updatedAt)}</> : null}
@@ -715,27 +817,14 @@ function DocumentRow({
             </div>
           ) : null}
         </div>
-        {isActive ? (
-          <div className="mt-2 flex items-center gap-2">
-            <div className="h-1.5 flex-1 rounded-full bg-neutral-100 overflow-hidden">
-              <div
-                className="h-full rounded-full bg-brand-500 transition-all duration-300"
-                style={{ width: `${String(percent)}%` }}
-              />
-            </div>
-            <span className="text-xs text-ink-subtle shrink-0 tabular-nums">{percent}%</span>
-          </div>
-        ) : null}
-        {doc.processStatus === "failed" ? (
-          <p className="text-xs text-danger mt-1">{message}</p>
-        ) : null}
+        <DocumentProcessingSteps document={doc} progress={progress} />
       </div>
       <div className="flex items-center gap-2 shrink-0">
-        <Badge tone={tone}>{statusLabels[doc.processStatus] ?? doc.processStatus}</Badge>
+        <Badge tone={tone}>{statusLabels[stage] ?? stage}</Badge>
         <Button variant="outline" size="sm" onClick={onPreview}>
           预览
         </Button>
-        {canManage && doc.processStatus === "failed" ? (
+        {canManage && stage === "failed" ? (
           <Button variant="secondary" size="sm" onClick={onReprocess}>
             重试
           </Button>
@@ -762,7 +851,12 @@ function DocumentRow({
             <Button variant="outline" size="sm" onClick={onRestore}>
               恢复
             </Button>
-            <Button variant="ghost" size="sm" className="text-danger hover:text-danger hover:bg-danger-bg" onClick={onHardDelete}>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-danger hover:text-danger hover:bg-danger-bg"
+              onClick={onHardDelete}
+            >
               彻底删除
             </Button>
           </>
@@ -770,18 +864,6 @@ function DocumentRow({
       </div>
     </div>
   );
-}
-
-function statusPercent(status: string): number {
-  switch (status) {
-    case "pending": return 5;
-    case "parsing": return 20;
-    case "chunking": return 45;
-    case "embedding": return 70;
-    case "completed": return 100;
-    case "failed": return 100;
-    default: return 0;
-  }
 }
 
 function formatBytes(value: number | null): string {
