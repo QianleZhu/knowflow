@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { isMarkdownTableSeparatorLine, formatPageMarker } from "./document-text-structure.js";
 import { splitParentChunks, splitChildChunks } from "./document-chunker.js";
+import type { ParsedContentBlock } from "./document-blocks.js";
 
 const TABLE_HEADER = "| 项目 | 金额 | 负责人 |";
 const TABLE_SEPARATOR = "| --- | --- | --- |";
@@ -13,7 +14,9 @@ function buildExpenseTable(rows: number, withSeparator = true): string {
     lines.push(TABLE_SEPARATOR);
   }
   for (let i = 1; i <= rows; i += 1) {
-    lines.push(`| 差旅报销第${String(i)}项 | ${String(10000 + i)} | 市场部第${String(i)}小组张三 |`);
+    lines.push(
+      `| 差旅报销第${String(i)}项 | ${String(10000 + i)} | 市场部第${String(i)}小组张三 |`,
+    );
   }
   return lines.join("\n");
 }
@@ -111,6 +114,50 @@ void describe("long table parent splitting", () => {
   });
 });
 
+// 验证 Docling 长结构节点按句子拆父块，并保留节点的跨页范围。
+void describe("structured parent splitting", () => {
+  void it("keeps adjacent headings in separate parents without duplicating them or losing hierarchy", () => {
+    const blocks: ParsedContentBlock[] = [
+      { kind: "heading", markdown: "# TCP 握手总结", level: 1, pageNumbers: [1] },
+      { kind: "heading", markdown: "# TCP 握手总结", level: 1, pageNumbers: [1] },
+      { kind: "heading", markdown: "## TCP 基本认识", level: 2, pageNumbers: [1] },
+      { kind: "heading", markdown: "## TCP 基本认识", level: 2, pageNumbers: [1] },
+    ];
+    const parents = splitParentChunks("", blocks);
+
+    assert.deepEqual(parents.map((parent) => parent.content), blocks.map((block) => block.markdown));
+    assert.deepEqual(parents[2]?.headingPath, ["TCP 握手总结", "TCP 基本认识"]);
+    assert.deepEqual(parents[3]?.headingPath, ["TCP 握手总结", "TCP 基本认识"]);
+  });
+
+  void it("rejects an explicitly empty tree instead of falling back to Markdown", () => {
+    assert.throws(() => splitParentChunks("# 标题\n\n正文", []), /缺少文档树节点/);
+  });
+
+  void it("splits an oversized paragraph at sentence boundaries and retains its page range", () => {
+    const source: ParsedContentBlock = {
+      kind: "paragraph",
+      markdown: buildParagraph(100),
+      level: null,
+      pageNumbers: [1, 2],
+    };
+    const parents = splitParentChunks(source.markdown, [source]);
+
+    assert.ok(parents.length > 1);
+    assert.ok(parents.every((parent) => parent.content.length > 0 && parent.content.length <= 4000));
+    assert.ok(parents.every((parent) => parent.pageStart === 1 && parent.pageEnd === 2));
+    assert.ok(parents.every((parent) => parent.content.startsWith("这是第") && parent.content.endsWith("。")));
+    const sentenceIndexes = parents.flatMap((parent) =>
+      [...parent.content.matchAll(/这是第(\d+)段/g)].map((match) => match[1]),
+    );
+    assert.deepEqual(
+      sentenceIndexes,
+      Array.from({ length: 100 }, (_, index) => String(index)),
+      "all sentences must remain in source order without loss or duplication",
+    );
+  });
+});
+
 void describe("table child splitting", () => {
   void it("splits pure table child chunks by rows with header and without overlap", () => {
     const table = buildExpenseTable(40);
@@ -149,18 +196,14 @@ void describe("table child splitting", () => {
     }
   });
 
-  void it("keeps overlap behavior for plain paragraph child chunks", () => {
+  void it("splits plain paragraph children at complete sentence boundaries", () => {
     const paragraph = buildParagraph(60);
     const children = splitChildChunks(paragraph);
 
     assert.ok(children.length >= 2);
-    const first = children[0];
-    const second = children[1];
-    assert.ok(first);
-    assert.ok(second);
-    assert.ok(
-      second.content.startsWith(first.content.slice(-120)),
-      "plain text children must keep the 120-char overlap context",
-    );
+    for (const child of children) {
+      assert.match(child.content, /^这是第\d+段/);
+      assert.ok(child.content.endsWith("。"), "every child must end after a complete sentence");
+    }
   });
 });

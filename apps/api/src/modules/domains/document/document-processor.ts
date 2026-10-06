@@ -285,7 +285,11 @@ async function replaceChunks(
   parsed: ParsedDocument,
   processVersion: number,
 ): Promise<void> {
-  const parents = splitParentChunks(parsed.text);
+  // Docling 文档使用树节点和节点页码；其他解析器继续走 Markdown 兼容路径。
+  if (parsed.metadata.parser === "docling" && parsed.structuredBlocks === undefined) {
+    throw new Error("Docling 解析结果缺少结构块，拒绝使用 Markdown 切块");
+  }
+  const parents = splitParentChunks(parsed.text, parsed.structuredBlocks);
   // 父子片段必须一起替换，任一插入失败时回滚整个事务。
   await db.transaction(async (tx) => {
     const [currentDocument] = await tx

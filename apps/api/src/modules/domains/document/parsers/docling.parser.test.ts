@@ -30,6 +30,7 @@ function result(markdown: string, count = 1): DoclingResult {
   return {
     nonce,
     pages: [{ pageNumber: 1, markdown }],
+    blocks: [{ kind: "paragraph", markdown, level: null, pageNumbers: [1] }],
     images: Array.from({ length: count }, (_, index) => ({
       marker: marker(index),
       base64: image(),
@@ -56,7 +57,8 @@ void it("inserts raw descriptions between related paragraphs, without synthetic 
   assert.match(parsed.text, /价格 \$&/);
   assert.doesNotMatch(parsed.text, /KNOWFLOW_IMAGE|## 文档图片|!\[/);
   assert.match(parsed.text, /KNOWFLOW_PAGE_BREAK:1/);
-  const parents = splitParentChunks(parsed.text);
+  assert.ok(parsed.structuredBlocks);
+  const parents = splitParentChunks(parsed.text, parsed.structuredBlocks);
   assert.equal(parents.length, 1);
   assert.ok(
     splitChildChunks(parents[0]?.content ?? "").some((chunk) =>
@@ -159,7 +161,14 @@ void it("fails explicitly on service errors and invalid protocol instead of degr
   );
   await assert.rejects(parseDoclingDocument(Buffer.from("document"), "docx"), /HTTP 503/);
   requests.mock.mockImplementation(() =>
-    Promise.resolve(Response.json({ nonce, pages: [], images: [], warnings: [] })),
+    Promise.resolve(
+      Response.json({
+        nonce,
+        pages: [{ pageNumber: 1, markdown: "正文" }],
+        images: [],
+        warnings: [],
+      }),
+    ),
   );
   await assert.rejects(parseDoclingDocument(Buffer.from("document"), "docx"), /格式不匹配/);
 });

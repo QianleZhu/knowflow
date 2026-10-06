@@ -1,8 +1,9 @@
 // Docling 结构转换与图片原位回填：最终正文只保留识别文字，不保留图片标记。
 import { createHash } from "node:crypto";
 import { imageSize } from "image-size";
-import { toParsedDocument } from "./cleaner.js";
+import { cleanMarkdownText, toParsedDocument } from "./cleaner.js";
 import { formatPageMarker } from "../document-text-structure.js";
+import type { ParsedContentBlock } from "../document-blocks.js";
 import { prepareMarkdownImages } from "./markdown-images.js";
 import type { ParsedDocument, VisionImageInput, VisionBudget, VisionStats } from "./types.js";
 import {
@@ -16,6 +17,8 @@ import {
 export type DoclingResult = {
   nonce: string;
   pages: { pageNumber: number | null; markdown: string }[];
+  // 文档树块是 Docling 分块的唯一输入，缺失时不能退回 Markdown 切块。
+  blocks: ParsedContentBlock[];
   // 一次序列化整篇后页码不再按页拆分，由适配层单独给出总页数；旧版本没有此字段。
   pageCount?: number | null;
   images: { marker: string; base64: string }[];
@@ -37,6 +40,7 @@ function validateResult(value: unknown): DoclingResult {
     !/^[a-f0-9]{32}$/.test(result["nonce"]) ||
     !Array.isArray(result["pages"]) ||
     result["pages"].length === 0 ||
+    !Array.isArray(result["blocks"]) ||
     !Array.isArray(result["images"]) ||
     !Array.isArray(result["warnings"])
   ) {
@@ -53,6 +57,40 @@ function validateResult(value: unknown): DoclingResult {
         (!Number.isSafeInteger(page.pageNumber) || Number(page.pageNumber) < 1))
     ) {
       throw new Error("Docling 返回了无效分页内容");
+    }
+  }
+  if (result["blocks"].length > 100_000) {
+    throw new Error("Docling 返回了无效结构块");
+  }
+  const allowedKinds = new Set([
+    "heading",
+    "paragraph",
+    "list",
+    "table",
+    "code",
+    "picture",
+    "other",
+  ]);
+  for (const block of result["blocks"] as unknown[]) {
+    if (
+      typeof block !== "object" ||
+      block === null ||
+      !("kind" in block) ||
+      typeof block.kind !== "string" ||
+      !allowedKinds.has(block.kind) ||
+      !("markdown" in block) ||
+      typeof block.markdown !== "string" ||
+      block.markdown.length > 5_000_000 ||
+      !("level" in block) ||
+      (block.level !== null &&
+        (!Number.isSafeInteger(block.level) ||
+          Number(block.level) < 1 ||
+          Number(block.level) > 100)) ||
+      !("pageNumbers" in block) ||
+      !Array.isArray(block.pageNumbers) ||
+      !block.pageNumbers.every((page) => Number.isSafeInteger(page) && Number(page) > 0)
+    ) {
+      throw new Error("Docling 返回了无效结构块");
     }
   }
   for (const image of result["images"] as unknown[]) {
@@ -149,9 +187,53 @@ export async function backfillDoclingImages(
   const stats = newVisionStats();
   const budget = newVisionBudget();
   const cache = new Map<string, string>();
+  const markerDescriptions = new Map<string, string>();
   const images = new Map(result.images.map((image) => [image.marker, image]));
   const markerPattern = new RegExp(`<!-- KNOWFLOW_IMAGE:${result.nonce}:\\d+ -->`, "g");
   const pages: string[] = [];
+
+  // 读取并缓存图片描述，页面 Markdown 与结构块共用同一识别结果。
+  async function describeMarker(marker: string): Promise<string> {
+    const existing = markerDescriptions.get(marker);
+    if (existing !== undefined) return existing;
+    const image = images.get(marker);
+    if (image === undefined) {
+      pushUniqueWarning(stats, "docling_image_unavailable");
+      markerDescriptions.set(marker, "");
+      return "";
+    }
+    const bytes = Buffer.from(image.base64, "base64");
+    const hash = createHash("sha256").update(bytes).digest("hex");
+    let description = cache.get(hash);
+    if (description === undefined) {
+      try {
+        // 尺寸和类型均从实际字节读取，不信任服务声称的图片格式。
+        const dimensions = imageSize(bytes);
+        description =
+          (await describe(
+            {
+              buffer: bytes,
+              mimeType:
+                dimensions.type === "jpg" ? "image/jpeg" : `image/${dimensions.type ?? "png"}`,
+              sourceLabel: "文档图片",
+              width: dimensions.width,
+              height: dimensions.height,
+              skipDecorative: true,
+            },
+            budget,
+            stats,
+          )) ?? "";
+      } catch {
+        stats.failed += 1;
+        pushUniqueWarning(stats, "docling_image_invalid");
+        description = "";
+      }
+      cache.set(hash, description);
+    }
+    markerDescriptions.set(marker, description);
+    return description;
+  }
+
   for (const page of result.pages) {
     const markdown = page.markdown;
     const parts: string[] = [];
@@ -159,41 +241,8 @@ export async function backfillDoclingImages(
     for (const match of markdown.matchAll(markerPattern)) {
       parts.push(markdown.slice(position, match.index));
       position = match.index + match[0].length;
-      const image = images.get(match[0]);
-      if (image === undefined) {
-        pushUniqueWarning(stats, "docling_image_unavailable");
-        continue;
-      }
-      const bytes = Buffer.from(image.base64, "base64");
-      const hash = createHash("sha256").update(bytes).digest("hex");
-      let description = cache.get(hash);
-      if (description === undefined) {
-        try {
-          // 尺寸和类型均从实际字节读取，不信任服务声称的图片格式。
-          const dimensions = imageSize(bytes);
-          description =
-            (await describe(
-              {
-                buffer: bytes,
-                mimeType:
-                  dimensions.type === "jpg" ? "image/jpeg" : `image/${dimensions.type ?? "png"}`,
-                sourceLabel: "文档图片",
-                width: dimensions.width,
-                height: dimensions.height,
-                skipDecorative: true,
-              },
-              budget,
-              stats,
-            )) ?? "";
-        } catch {
-          stats.failed += 1;
-          pushUniqueWarning(stats, "docling_image_invalid");
-          description = "";
-        }
-        cache.set(hash, description);
-      }
       // 用字符串片段拼接，识别结果中的 $& 等字符不会触发替换语义。
-      parts.push(description);
+      parts.push(await describeMarker(match[0]));
     }
     parts.push(markdown.slice(position));
     pages.push(
@@ -205,10 +254,27 @@ export async function backfillDoclingImages(
         .join("\n\n"),
     );
   }
-  return toParsedDocument(pages.join("\n\n"), "docling", {
+  const structuredBlocks: ParsedContentBlock[] = [];
+  for (const block of result.blocks) {
+    let position = 0;
+    const parts: string[] = [];
+    for (const match of block.markdown.matchAll(markerPattern)) {
+      parts.push(block.markdown.slice(position, match.index));
+      position = match.index + match[0].length;
+      parts.push(await describeMarker(match[0]));
+    }
+    parts.push(block.markdown.slice(position));
+    const markdown = parts.join("").trim();
+    structuredBlocks.push({
+      ...block,
+      markdown: markdown.length === 0 ? "" : cleanMarkdownText(markdown).text,
+    });
+  }
+  const parsed = await toParsedDocument(pages.join("\n\n"), "docling", {
     ...(format === "pdf" ? { pdfPageCount: result.pageCount ?? result.pages.length } : {}),
     ...(format === "docx" ? { originalFormat: "docx" as const } : {}),
     ...visionStatsMetadata(stats),
     ...(result.warnings.length > 0 ? { parserWarnings: [...new Set(result.warnings)] } : {}),
   });
+  return { ...parsed, structuredBlocks };
 }

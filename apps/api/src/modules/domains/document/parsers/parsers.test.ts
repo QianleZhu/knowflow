@@ -12,7 +12,8 @@ import {
   validateBatchImportContent,
 } from "../../../../shared/upload/upload-file-validation.js";
 import { parseSpreadsheetForBatchImport } from "../../../../shared/import/spreadsheet-import.js";
-import { splitChildChunks } from "../document-chunker.js";
+import { splitChildChunks, splitParentChunks } from "../document-chunker.js";
+import { parseDoclingDocument } from "./docling.parser.js";
 import { readImageDimensions } from "./image-dimensions.js";
 import { parseDocumentBuffer } from "./registry.js";
 import type { ParserContext } from "./types.js";
@@ -24,6 +25,50 @@ const context: ParserContext = {
   documentId: "parser-regression",
   title: "解析回归",
 };
+
+// 构造仅含 ASCII 文本的多页 PDF，用于验证 Docling 的跨页来源信息。
+function buildTextPdf(pageTexts: string[]): Buffer {
+  const pageObjectIds = pageTexts.map((_, index) => 3 + index * 2);
+  const fontObjectId = 3 + pageTexts.length * 2;
+  const objects: string[] = [];
+  objects[1] = "<< /Type /Catalog /Pages 2 0 R >>";
+  objects[2] =
+    "<< /Type /Pages /Kids [" +
+    pageObjectIds.map((id) => `${String(id)} 0 R`).join(" ") +
+    `] /Count ${String(pageTexts.length)} >>`;
+
+  pageTexts.forEach((pageText, index) => {
+    const pageObjectId = pageObjectIds[index];
+    assert.ok(pageObjectId);
+    const contentObjectId = pageObjectId + 1;
+    // PDF 字符串中的反斜线和括号必须转义，避免破坏内容流。
+    const escapedText = pageText.replace(/[\\()]/g, "\\$&");
+    const contentStream = `BT /F1 12 Tf 72 720 Td (${escapedText}) Tj ET`;
+    objects[pageObjectId] =
+      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 ${String(fontObjectId)} 0 R >> >> /Contents ${String(contentObjectId)} 0 R >>`;
+    objects[contentObjectId] =
+      `<< /Length ${String(Buffer.byteLength(contentStream, "ascii"))} >>\nstream\n${contentStream}\nendstream`;
+  });
+  objects[fontObjectId] =
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>";
+
+  let pdf = "%PDF-1.4\n";
+  const offsets = [0];
+  // xref 保存对象在 PDF 字节流中的偏移，供解析器准确读取页面树。
+  for (let objectId = 1; objectId < objects.length; objectId += 1) {
+    offsets[objectId] = Buffer.byteLength(pdf, "ascii");
+    const object = objects[objectId];
+    assert.ok(object);
+    pdf += `${String(objectId)} 0 obj\n${object}\nendobj\n`;
+  }
+  const xrefOffset = Buffer.byteLength(pdf, "ascii");
+  pdf += `xref\n0 ${String(objects.length)}\n0000000000 65535 f \n`;
+  for (let objectId = 1; objectId < objects.length; objectId += 1) {
+    pdf += `${String(offsets[objectId]).padStart(10, "0")} 00000 n \n`;
+  }
+  pdf += `trailer\n<< /Size ${String(objects.length)} /Root 1 0 R >>\nstartxref\n${String(xrefOffset)}\n%%EOF\n`;
+  return Buffer.from(pdf, "ascii");
+}
 
 // 构造三种 WebP 编码的尺寸头，独立验证 image-size 的格式识别。
 function webpHeader(format: "VP8X" | "VP8L" | "VP8 ", width: number, height: number): Buffer {
@@ -101,6 +146,28 @@ void describe("image-size and WebP regression", () => {
 
 void describe("parser registry and shared spreadsheet regression", () => {
   void it(
+    "exports normalized heading levels and preserves their hierarchy in parent chunks",
+    { skip: process.env["DOCLING_INTEGRATION"] !== "1" },
+    async () => {
+      const parsed = await parseDoclingDocument(
+        Buffer.from("# 一级标题\n\n## 二级标题\n\n### 三级标题\n\n正文内容"),
+        "md",
+      );
+      const blocks = parsed.structuredBlocks ?? [];
+      const headings = blocks.filter((block) => block.kind === "heading");
+      const parents = splitParentChunks(parsed.text, blocks);
+
+      assert.deepEqual(headings.map((block) => block.level), [1, 2, 3]);
+      assert.deepEqual(parents.map((parent) => parent.content), [
+        "# 一级标题",
+        "## 二级标题",
+        "### 三级标题\n\n正文内容",
+      ]);
+      assert.deepEqual(parents[2]?.headingPath, ["一级标题", "二级标题", "三级标题"]);
+    },
+  );
+
+  void it(
     "converts a real text PDF to Markdown while retaining page metadata",
     { skip: process.env["DOCLING_INTEGRATION"] !== "1" },
     async () => {
@@ -114,6 +181,76 @@ void describe("parser registry and shared spreadsheet regression", () => {
       assert.equal(parsed.metadata.visionImageCount, 0);
       assert.equal(parsed.metadata.contentFormat, "markdown");
       assert.equal(parsed.metadata.markdownDialect, "gfm");
+      assert.ok((parsed.structuredBlocks?.length ?? 0) > 0);
+      assert.ok(parsed.structuredBlocks?.some((block) => block.pageNumbers.includes(1)));
+      const parents = splitParentChunks(parsed.text, parsed.structuredBlocks);
+      assert.ok(parents.length > 0);
+      assert.ok(parents.every((parent) => parent.pageStart === 1 && parent.pageEnd === 1));
+      assert.ok(parents.every((parent) => parent.content.length > 0 && parent.content.length <= 4000));
+      const parentChildPairs = parents.flatMap((parent) =>
+        splitChildChunks(parent.content).map((child) => ({ parent, child })),
+      );
+      assert.ok(parentChildPairs.length >= parents.length);
+      assert.ok(
+        parentChildPairs.every(
+          ({ parent, child }) => child.content.length > 0 && parent.content.includes(child.content),
+        ),
+      );
+    },
+  );
+
+  void it(
+    "maps text from both pages across parent and child chunks without a forced page split",
+    { skip: process.env["DOCLING_INTEGRATION"] !== "1" },
+    async () => {
+      const parsed = await parseDocumentBuffer(
+        buildTextPdf([
+          "UNIQUEPAGEONE alpha first sentence continues with enough searchable text for this page.",
+          "UNIQUEPAGETWO beta second sentence continues with enough searchable text for this page.",
+        ]),
+        {
+          ...context,
+          sourceType: "pdf",
+          mimeType: "application/pdf",
+          documentId: "parser-multipage-regression",
+        },
+      );
+      const blocks = parsed.structuredBlocks ?? [];
+      const parents = splitParentChunks(parsed.text, blocks);
+
+      assert.equal(parsed.metadata.parser, "docling");
+      assert.equal(parsed.metadata.pdfPageCount, 2);
+      assert.ok(blocks.some((block) => block.pageNumbers.includes(1)));
+      assert.ok(blocks.some((block) => block.pageNumbers.includes(2)));
+      assert.ok(parents.length > 0);
+      assert.ok(parents.every((parent) => parent.content.length > 0 && parent.content.length <= 4000));
+
+      for (const [marker, expectedPage] of [
+        ["UNIQUEPAGEONE", 1],
+        ["UNIQUEPAGETWO", 2],
+      ] as const) {
+        const sourceBlock = blocks.find((block) => block.markdown.includes(marker));
+        const parent = parents.find((candidate) => candidate.content.includes(marker));
+        assert.ok(sourceBlock, `Docling must retain the source block for ${marker}`);
+        assert.ok(parent, `a parent chunk must contain ${marker}`);
+        assert.ok(sourceBlock.pageNumbers.includes(expectedPage));
+        assert.ok(parent.pageStart !== null && parent.pageEnd !== null);
+        assert.ok(parent.pageStart <= expectedPage && parent.pageEnd >= expectedPage);
+      }
+      assert.ok(
+        parents.some((parent) => parent.pageStart === 1 && parent.pageEnd === 2),
+        "a short semantic section spanning two pages should stay in one parent chunk",
+      );
+
+      const parentChildPairs = parents.flatMap((parent) =>
+        splitChildChunks(parent.content).map((child) => ({ parent, child })),
+      );
+      assert.ok(parentChildPairs.length >= parents.length);
+      assert.ok(
+        parentChildPairs.every(
+          ({ parent, child }) => child.content.length > 0 && parent.content.includes(child.content),
+        ),
+      );
     },
   );
 

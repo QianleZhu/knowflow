@@ -45,6 +45,10 @@ async function main(): Promise<void> {
     );
     assert.equal(response.status, 200, `Docling ${format} HTTP ${String(response.status)}`);
     const structure = (await response.json()) as DoclingResult;
+    assert.ok(
+      Array.isArray(structure.blocks) && structure.blocks.length > 0,
+      `${format} 没有返回可用于结构切分的 Docling 文档树`,
+    );
     const raw = structure.pages.map((page) => page.markdown).join("\n\n");
     assert.equal(structure.images.length, 1, `${format} 没有提取出图片资源`);
     const firstImage = structure.images[0];
@@ -88,7 +92,8 @@ async function main(): Promise<void> {
     } else {
       assert.doesNotMatch(parsed.text, /KNOWFLOW_PAGE_BREAK/);
     }
-    const children = splitParentChunks(parsed.text).flatMap((parent) =>
+    assert.ok(parsed.structuredBlocks, `${format} 没有返回 Docling 结构块`);
+    const children = splitParentChunks(parsed.text, parsed.structuredBlocks).flatMap((parent) =>
       splitChildChunks(parent.content),
     );
     assert.ok(

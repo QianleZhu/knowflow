@@ -100,6 +100,37 @@ async function main(): Promise<void> {
       .where(eq(childChunks.documentId, documentId));
     assert.ok(parents.length >= 1);
     assert.ok(children.length >= 1);
+    const parentsById = new Map(parents.map((parent) => [parent.id, parent]));
+    assert.equal(parentsById.size, parents.length, "父块 ID 必须唯一");
+    assert.ok(
+      children.every((child) => parentsById.has(child.parentChunkId)),
+      "每个子块都必须关联本次文档生成的父块",
+    );
+    assert.ok(
+      parents.every((parent) => children.some((child) => child.parentChunkId === parent.id)),
+      "每个父块都必须至少拥有一个子块",
+    );
+    for (const child of children) {
+      const parent = parentsById.get(child.parentChunkId);
+      assert.ok(parent);
+      const childMetadata = child.metadata as Record<string, unknown>;
+      assert.equal(childMetadata["parentTitle"], parent.title);
+      assert.deepEqual(childMetadata["headingPath"], parent.headingPath);
+      assert.equal(childMetadata["pageStart"], parent.pageStart);
+      assert.equal(childMetadata["pageEnd"], parent.pageEnd);
+      assert.ok(child.content.length > 0);
+    }
+    assert.ok(
+      parents.every((parent) => parent.content.length > 0 && parent.content.length <= 4000),
+      "父块必须有内容且不超过项目上限",
+    );
+    if (sourceType === "pdf") {
+      assert.equal((document.metadata as Record<string, unknown>)["pdfPageCount"], 1);
+      assert.ok(
+        parents.every((parent) => parent.pageStart === 1 && parent.pageEnd === 1),
+        "真实单页 PDF 的父块页码必须映射到第 1 页",
+      );
+    }
     if (sourceType === "txt") {
       assert.equal(parents.length, 2);
       assert.ok(children.length >= 2);
@@ -123,6 +154,8 @@ async function main(): Promise<void> {
         parser: expectedParser,
         parents: parents.length,
         children: children.length,
+        parentPageRanges: parents.map((parent) => [parent.pageStart, parent.pageEnd]),
+        childParentLinksComplete: children.every((child) => parentsById.has(child.parentChunkId)),
         embeddingDimension: 1024,
         staleAndRepeatedJobsSkipped: true,
       }),

@@ -13,6 +13,22 @@ $env:HF_ENDPOINT='https://hf-mirror.com'
 .venv-docling/Scripts/python.exe -m uvicorn services.docling.app:app --host 127.0.0.1 --port 5001
 ```
 
+上面的环境创建和依赖安装只需执行一次。前台命令会占用当前终端，按 `Ctrl+C` 停止。日常在仓库根目录用管理脚本后台启动：
+
+```powershell
+.\services\docling\docling.ps1 start
+
+# 常用管理命令
+.\services\docling\docling.ps1 status
+.\services\docling\docling.ps1 logs
+.\services\docling\docling.ps1 stop
+
+# 模型已完整缓存时可离线启动
+.\services\docling\docling.ps1 start -Offline
+```
+
+`start` 会自动等待健康检查；服务已运行时重复执行不会创建第二个实例。未指定 `-Offline` 且没有配置 `HF_ENDPOINT` 时，脚本默认使用 Hugging Face 镜像。日志保存在 `%TEMP%\knowflow-docling`。
+
 `HF_ENDPOINT` 用于模型下载与启动校验，详见下方「模型下载与网络」。模型缓存完整后可去掉它，改用 `HF_HUB_OFFLINE=1` 完全离线运行。
 
 Worker 默认连接 `http://127.0.0.1:5001`，可通过 `DOCLING_URL` 修改。服务与 Worker 均设置 `DOCLING_API_KEY` 时使用请求头认证。服务只应暴露给 Worker，反向代理应限制请求体不超过 70MB。CPU 可以运行。固定的依赖版本见 requirements.txt。

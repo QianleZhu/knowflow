@@ -1,8 +1,11 @@
 // 文档解析与视觉 OCR 的公共类型。
 import type { DocumentSourceType } from "@knowflow/shared";
+import type { ParsedContentBlock } from "../document-blocks.js";
 
 export type ParsedDocument = {
   text: string;
+  // Docling 格式额外保留顺序、标题层级和来源页码；其他解析器继续使用 Markdown 兜底。
+  structuredBlocks?: ParsedContentBlock[];
   metadata: {
     parser:
       | "docling"

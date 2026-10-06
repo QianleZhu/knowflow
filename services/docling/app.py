@@ -62,6 +62,60 @@ def number_page_breaks(markdown: str) -> str:
     )
 
 
+# 按 Docling 文档树顺序导出最小结构块，并把页码留在各自节点上。
+def serialize_structured_blocks(doc, serializer) -> list[dict]:
+    blocks = []
+    for item, level in doc.iterate_items(with_groups=False, traverse_pictures=True):
+        label = getattr(getattr(item, "label", None), "value", "")
+        if label == "section_header":
+            kind = "heading"
+            heading_level = getattr(item, "level", 1)
+        elif label == "title":
+            kind = "heading"
+            heading_level = 1
+        elif label in {"table", "document_index"}:
+            kind = "table"
+            heading_level = None
+        elif label == "list_item":
+            kind = "list"
+            heading_level = None
+        elif label == "code":
+            kind = "code"
+            heading_level = None
+        elif label in {"picture", "chart"}:
+            kind = "picture"
+            heading_level = None
+        elif label in {"text", "paragraph", "caption", "footnote", "formula", "handwritten_text"}:
+            kind = "paragraph"
+            heading_level = None
+        else:
+            kind = "other"
+            heading_level = None
+
+        # 复用官方 Markdown serializer，保留表格、代码块、列表和图片占位符格式。
+        markdown = serializer.serialize(item=item, list_level=level).text.strip()
+        if not markdown:
+            continue
+        # SectionHeaderItem.level 可能从文档标题之后重新计数，结构块层级统一对齐序列化结果。
+        if kind == "heading":
+            heading_match = re.match(r"^(#{1,6})\s+", markdown)
+            if heading_match is not None:
+                heading_level = len(heading_match.group(1))
+        pages = sorted({
+            provenance.page_no
+            for provenance in getattr(item, "prov", [])
+            if isinstance(getattr(provenance, "page_no", None), int)
+            and provenance.page_no > 0
+        })
+        blocks.append({
+            "kind": kind,
+            "markdown": markdown,
+            "level": heading_level,
+            "pageNumbers": pages,
+        })
+    return blocks
+
+
 # 仅返回健康状态，不暴露模型或运行配置。
 @app.get("/health")
 def health():
@@ -99,6 +153,8 @@ def convert(request: ConvertRequest, x_api_key: str | None = Header(default=None
             doc=doc, picture_serializer=IndexedPictureSerializer(), params=params
         )
         markdown = serializer.serialize().text
+        # 父块切分使用 Docling 节点与来源页码，不再从整篇 Markdown 反向匹配字符串。
+        structured_blocks = serialize_structured_blocks(doc, serializer)
         if is_pdf:
             markdown = number_page_breaks(markdown)
         images = []
@@ -118,6 +174,7 @@ def convert(request: ConvertRequest, x_api_key: str | None = Header(default=None
         return {
             "nonce": nonce,
             "pages": [{"pageNumber": None, "markdown": markdown}],
+            "blocks": structured_blocks,
             "pageCount": len(doc.pages) if is_pdf else None,
             "images": images,
             "warnings": sorted(set(warnings)),
