@@ -250,7 +250,9 @@ pnpm --filter @knowflow/api worker
 
 ### 图片 OCR 不工作
 
-PDF（文字型）、DOCX、MD 需要启动 [Docling 解析适配服务](services/docling/README.md)，将图片描述回填到原位置。图片解析依赖模型配置中的 `ocr` 用途模型。seed 默认配置了对话、Embedding、Rerank、知识生产等用途，但 OCR 可能需要在模型配置后台单独启用。
+文字 PDF 和 DOCX 需要启动 [Docling 解析适配服务](services/docling/README.md)。日常在仓库根目录执行 `.\services\docling\docling.ps1 start`，随后运行 `pnpm dev:all`；依赖与模型只需首次安装。Markdown 使用原生语法树，扫描 PDF 和图片复用视觉 OCR；混合 PDF 按页选择 Docling 或 OCR。图片识别依赖模型配置中的 `ocr` 用途模型，需在后台启用。
+
+所有格式统一输出结构块，再生成父子块；物理分页不强制结束章节。父块携带完整标题路径、实际内容的页码集合和来源坐标，子块继承父块元数据。跨页续表根据相邻页、同一章节与匹配表头合并，长表格按数据行切分并重复表头。OCR 不设置项目调用次数或输出 token 上限，必需页面失败或输出截断会报告失败。实现与验证说明见 [文档解析与分块方案](docs/document-parsing-plan.md)。已有文档需要点击“重新处理”应用新策略。
 
 **支持的图片场景**：整图上传（PNG/JPG）、扫描件 PDF（逐页渲染 OCR）、PDF 内嵌图片、DOCX 内嵌图片。
 

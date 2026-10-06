@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 from docling.document_converter import DocumentConverter, PdfFormatOption, MarkdownFormatOption
 from docling.datamodel.base_models import DocumentStream, InputFormat, ConversionStatus
 from docling.datamodel.backend_options import MarkdownBackendOptions
-from docling.datamodel.pipeline_options import PdfPipelineOptions
+from docling.datamodel.pipeline_options import PdfPipelineOptions, HeadingHierarchyOptions
 from docling_core.transforms.serializer.markdown import MarkdownDocSerializer, MarkdownParams, MarkdownPictureSerializer
 from docling_core.transforms.serializer.common import create_ser_result
 
@@ -22,6 +22,9 @@ PAGE_BREAK_PLACEHOLDER = "<!-- KNOWFLOW_PAGE_BREAK -->"
 app = FastAPI(title="Knowflow Docling adapter")
 conversion_lock = Lock()
 pdf_options = PdfPipelineOptions(do_ocr=False, generate_picture_images=True)
+# 使用 Docling 正式的标题层级推断阶段，字体推断需要保留解析页面信息。
+pdf_options.heading_hierarchy_options = HeadingHierarchyOptions(enabled=True)
+pdf_options.generate_parsed_pages = True
 # 禁止文档指示解析服务读取任意本地文件或请求内网；只允许内嵌图片。
 converter = DocumentConverter(
     allowed_formats=[InputFormat.PDF, InputFormat.DOCX, InputFormat.MD],
@@ -63,10 +66,13 @@ def number_page_breaks(markdown: str) -> str:
 
 
 # 按 Docling 文档树顺序导出最小结构块，并把页码留在各自节点上。
-def serialize_structured_blocks(doc, serializer) -> list[dict]:
+def serialize_structured_blocks(doc, serializer, is_pdf: bool) -> list[dict]:
     blocks = []
     for item, level in doc.iterate_items(with_groups=False, traverse_pictures=True):
         label = getattr(getattr(item, "label", None), "value", "")
+        # 页眉页脚是版面元素，不作为正文或独立章节参与切分。
+        if label in {"page_header", "page_footer"}:
+            continue
         if label == "section_header":
             kind = "heading"
             heading_level = getattr(item, "level", 1)
@@ -104,16 +110,59 @@ def serialize_structured_blocks(doc, serializer) -> list[dict]:
         pages = sorted({
             provenance.page_no
             for provenance in getattr(item, "prov", [])
+            if is_pdf
             if isinstance(getattr(provenance, "page_no", None), int)
             and provenance.page_no > 0
         })
-        blocks.append({
+        source = {"blockId": item.self_ref, "pageNumbers": pages, "precision": "block"}
+        block = {
             "kind": kind,
             "markdown": markdown,
             "level": heading_level,
             "pageNumbers": pages,
-        })
+            "sources": [source],
+        }
+        if kind == "table" and getattr(item, "data", None) is not None:
+            block["table"] = serialize_table(item, doc, serializer, source, is_pdf)
+        blocks.append(block)
     return blocks
+
+
+# 导出表格单元格与行来源；普通 TableCell 不含 page_no，跨页节点只能声明块级精度。
+def serialize_table(item, doc, serializer, source: dict, is_pdf: bool) -> dict:
+    rows = []
+    header_rows = []
+    for row_index, cells in enumerate(item.data.grid):
+        row_id = f"{item.self_ref}:row:{row_index + 1}"
+        output_cells = []
+        for column_index, cell in enumerate(cells):
+            reference = getattr(cell, "ref", None)
+            child = reference.resolve(doc) if reference is not None else None
+            text = serializer.serialize(item=child).text if child is not None else cell.text
+            cell_pages = sorted({prov.page_no for prov in getattr(child, "prov", []) if is_pdf and prov.page_no > 0})
+            precise = bool(cell_pages) or len(source["pageNumbers"]) == 1
+            cell_source = {**source, "blockId": f"{row_id}:cell:{column_index + 1}",
+                           "pageNumbers": cell_pages or source["pageNumbers"],
+                           "precision": "cell" if precise else "block", "rowStart": row_index + 1,
+                           "rowEnd": row_index + 1}
+            output_cells.append({"text": text, "sources": [cell_source]})
+        row = {"id": row_id, "cells": output_cells,
+               "sources": [cell_source for cell in output_cells for cell_source in cell["sources"]]}
+        if cells and all(cell.column_header for cell in cells):
+            header_rows.append(row)
+        else:
+            rows.append(row)
+    if header_rows:
+        # 多层表头合并为完整列路径，原表头坐标继续保留。
+        header = {"id": f"{item.self_ref}:header", "sources": [src for row in header_rows for src in row["sources"]],
+                  "cells": [{"text": " / ".join(dict.fromkeys(row["cells"][column]["text"] for row in header_rows)),
+                             "sources": [src for row in header_rows for src in row["cells"][column]["sources"]]}
+                            for column in range(item.data.num_cols)]}
+    else:
+        # 未标注表头时不能吞掉第一条数据，用占位列名承载表格结构。
+        header = {"id": f"{item.self_ref}:header", "sources": [],
+                  "cells": [{"text": f"列 {column + 1}", "sources": []} for column in range(item.data.num_cols)]}
+    return {"header": header, "rows": rows}
 
 
 # 仅返回健康状态，不暴露模型或运行配置。
@@ -154,7 +203,7 @@ def convert(request: ConvertRequest, x_api_key: str | None = Header(default=None
         )
         markdown = serializer.serialize().text
         # 父块切分使用 Docling 节点与来源页码，不再从整篇 Markdown 反向匹配字符串。
-        structured_blocks = serialize_structured_blocks(doc, serializer)
+        structured_blocks = serialize_structured_blocks(doc, serializer, is_pdf)
         if is_pdf:
             markdown = number_page_breaks(markdown)
         images = []

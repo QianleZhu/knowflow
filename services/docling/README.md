@@ -1,6 +1,6 @@
 # Docling 文档解析适配服务
 
-PDF、DOCX、MD 通过此服务导出有序 Markdown 和图片资源，由 TypeScript Worker 执行图片过滤、Vision 识别和原位回填。最终正文不保留图片占位符或图片链接。扫描 PDF 仍使用原截图 OCR。
+文字 PDF 和 DOCX 通过此服务导出有序结构块、Markdown 和图片资源，由 TypeScript Worker 执行图片过滤、Vision 识别和原位回填。PDF 启用原生标题层级推断，并导出节点和表格单元格的来源信息。扫描 PDF 复用截图 OCR；混合 PDF 按页分流。Markdown 已改为 TypeScript 原生 AST，生产入口不再调用此服务；适配器保留 MD 转换能力用于服务回归。
 
 Docling 只有 Python SDK，因此这里使用 Python 作为薄适配层；业务、权限、数据库和向量化仍全部使用 TypeScript。适配层不读取上传者指定的路径、不请求图片外链、不执行 Vision。
 
@@ -42,7 +42,7 @@ Worker 默认连接 `http://127.0.0.1:5001`，可通过 `DOCLING_URL` 修改。�
 
 首次转换有 2～3 分钟冷启动（主要是模型加载，110 页 PDF 实测 146 秒），之后同一进程内不再重复。建议让服务常驻，避免每个文档都付一次冷启动成本。排查 PDF 失败时先看服务日志：若异常栈底部是 `snapshot_download` / `api.repo_info` / `ProxyError`，即为模型未就绪，与文档内容无关。
 
-MD 内嵌图片直接解析。HTTPS 外链图片需要管理员在 `DOCLING_MD_IMAGE_ORIGINS` 中填写可信来源（例如 `https://cdn.example.com`），禁止重定向，每张最多 20MB，每个文档最多下载 20 个来源。该配置必须只包含受信任、固定解析到公网的图片站点。相对路径图片当前缺少附件上传入口，无法读取时记录 `markdown_image_unavailable`，图片标记移除，正文继续解析。代码示例中的图片语法不会触发下载。
+Markdown 内嵌图片在 TypeScript 中原位识别。HTTPS 外链图片仍使用 `DOCLING_MD_IMAGE_ORIGINS` 管理可信来源（例如 `https://cdn.example.com`），禁止重定向，每张最多 20MB，不按文档图片数量限制下载或 OCR。该配置必须只包含受信任、固定解析到公网的图片站点。相对路径图片当前缺少附件上传入口，无法读取时记录 `markdown_image_unavailable`，保留替代文字，正文继续解析。代码示例中的图片语法不会触发下载。
 
 真实格式回归：先启动服务，再运行：
 

@@ -235,5 +235,18 @@ function isLikelyText(buffer: Buffer): boolean {
   if (buffer.length === 0) {
     return false;
   }
+  // UTF-16 文本允许编码本身的零字节，仍拒绝解码后的空字符和损坏的字节序列。
+  if ((buffer[0] === 0xff && buffer[1] === 0xfe) || (buffer[0] === 0xfe && buffer[1] === 0xff)) {
+    try {
+      return (
+        buffer.length % 2 === 0 &&
+        !new TextDecoder(buffer[0] === 0xff ? "utf-16le" : "utf-16be", { fatal: true })
+          .decode(buffer)
+          .includes("\0")
+      );
+    } catch {
+      return false;
+    }
+  }
   return !buffer.includes(0x00);
 }

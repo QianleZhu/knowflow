@@ -12,6 +12,7 @@ export type SpreadsheetParser = "csv-parse" | "read-excel-file" | "@e965/xlsx";
 export type SpreadsheetSheet = {
   name: string;
   rows: string[][];
+  rowNumbers: number[];
 };
 
 export type SpreadsheetReadResult = {
@@ -26,9 +27,9 @@ export async function readSpreadsheet(
   kind: SpreadsheetKind,
 ): Promise<SpreadsheetReadResult> {
   if (kind === "csv") {
-    const rows = parseCsvRows(buffer);
+    const { rows, rowNumbers } = parseCsvRows(buffer);
     return {
-      sheets: rows.length === 0 ? [] : [{ name: "Sheet1", rows }],
+      sheets: rows.length === 0 ? [] : [{ name: "Sheet1", rows, rowNumbers }],
       rowCount: rows.length,
       parser: "csv-parse",
     };
@@ -40,7 +41,7 @@ export async function readSpreadsheet(
 
   const parsedSheets = await readXlsxFile(buffer);
   const sheets = parsedSheets
-    .map((sheet) => ({ name: sheet.sheet, rows: worksheetRows(sheet.data) }))
+    .map((sheet) => ({ name: sheet.sheet, ...worksheetRows(sheet.data) }))
     .filter((sheet) => sheet.rows.length > 0);
   const rowCount = sheets.reduce((total, sheet) => total + sheet.rows.length, 0);
 
@@ -48,30 +49,36 @@ export async function readSpreadsheet(
 }
 
 // 解析带 BOM、空行和不等长列的 CSV 内容。
-function parseCsvRows(buffer: Buffer): string[][] {
+function parseCsvRows(buffer: Buffer): { rows: string[][]; rowNumbers: number[] } {
   const records = parseCsv(buffer, {
     bom: true,
     relaxColumnCount: true,
-    skipEmptyLines: true,
+    skipEmptyLines: false,
   }) as unknown;
 
   if (!Array.isArray(records)) {
     throw new Error("CSV 解析结果无效");
   }
 
-  return records
-    .filter((record): record is unknown[] => Array.isArray(record))
-    .map((record) => record.map((cell) => normalizeCell(cell)));
+  return worksheetRows(
+    records
+      .filter((record): record is unknown[] => Array.isArray(record))
+      .map((record) => record.map((cell) => normalizeCell(cell))),
+  );
 }
 
 // 规范化工作表单元格并移除空行及尾部空列。
-function worksheetRows(rows: SpreadsheetCellValue[][]): string[][] {
-  return rows
-    .map((row) => {
+function worksheetRows(rows: SpreadsheetCellValue[][]): { rows: string[][]; rowNumbers: number[] } {
+  const normalizedRows = rows
+    .map((row, index) => {
       const normalized = row.map((value) => normalizeCell(value));
-      return trimTrailingEmptyCells(normalized);
+      return { cells: trimTrailingEmptyCells(normalized), rowNumber: index + 1 };
     })
-    .filter((row) => row.some((cell) => cell.length > 0));
+    .filter((row) => row.cells.some((cell) => cell.length > 0));
+  return {
+    rows: normalizedRows.map((row) => row.cells),
+    rowNumbers: normalizedRows.map((row) => row.rowNumber),
+  };
 }
 
 // 使用旧版 Excel 读取器解析 OLE 工作簿，并关闭无关格式信息读取。
@@ -88,16 +95,18 @@ function readLegacyExcelFile(buffer: Buffer): SpreadsheetReadResult {
     const worksheet = workbook.Sheets[name];
     const rows =
       worksheet === undefined
-        ? []
+        ? { rows: [], rowNumbers: [] }
         : worksheetRows(
             XLS.utils.sheet_to_json<SpreadsheetCellValue[]>(worksheet, {
               header: 1,
-              blankrows: false,
+              // 从原始第 1 行读取，保留空行坐标，归一化后再移除空行。
+              blankrows: true,
+              range: 0,
               defval: "",
               raw: false,
             }),
           );
-    return { name, rows };
+    return { name, ...rows };
   }).filter((sheet) => sheet.rows.length > 0);
   const rowCount = sheets.reduce((total, sheet) => total + sheet.rows.length, 0);
 

@@ -5,10 +5,10 @@ import { cleanMarkdownText, toParsedDocument } from "./cleaner.js";
 import { formatPageMarker } from "../document-text-structure.js";
 import type { ParsedContentBlock } from "../document-blocks.js";
 import { prepareMarkdownImages } from "./markdown-images.js";
-import type { ParsedDocument, VisionImageInput, VisionBudget, VisionStats } from "./types.js";
+import { ensureBlockSources } from "./structured-content.js";
+import type { ParsedDocument, VisionImageInput, VisionStats } from "./types.js";
 import {
   describeImageWithVision,
-  newVisionBudget,
   newVisionStats,
   pushUniqueWarning,
   visionStatsMetadata,
@@ -24,12 +24,61 @@ export type DoclingResult = {
   images: { marker: string; base64: string }[];
   warnings: string[];
 };
-type ImageDescriber = (
-  image: VisionImageInput,
-  budget: VisionBudget,
-  stats: VisionStats,
-) => Promise<string | null>;
+type ImageDescriber = (image: VisionImageInput, stats: VisionStats) => Promise<string | null>;
 const MAX_RESPONSE_BYTES = 150 * 1024 * 1024;
+
+// 逐层校验来源坐标，禁止把未验证的服务 JSON 当成可落库元数据。
+function validSources(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length > 100_000) return false;
+  return value.every((source: unknown) => {
+    if (typeof source !== "object" || source === null) return false;
+    const fields = source as Record<string, unknown>;
+    return (
+      typeof fields["blockId"] === "string" &&
+      fields["blockId"].length <= 1000 &&
+      Array.isArray(fields["pageNumbers"]) &&
+      fields["pageNumbers"].every(
+        (page: unknown) => Number.isSafeInteger(page) && Number(page) > 0,
+      ) &&
+      ["block", "row", "cell"].includes(String(fields["precision"])) &&
+      ["lineStart", "lineEnd", "rowStart", "rowEnd"].every(
+        (key) =>
+          fields[key] === undefined ||
+          (Number.isSafeInteger(fields[key]) && Number(fields[key]) > 0),
+      ) &&
+      (fields["sheet"] === undefined || typeof fields["sheet"] === "string")
+    );
+  });
+}
+
+// 校验表格行和单元格，损坏的结构必须拒绝，不能静默丢弃长表格内容。
+function validTable(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const table = value as Record<string, unknown>;
+  if (!Array.isArray(table["rows"]) || table["rows"].length > 100_000) return false;
+  const rows: unknown[] = table["rows"];
+  return [table["header"], ...rows].every((row: unknown) => {
+    if (typeof row !== "object" || row === null) return false;
+    const fields = row as Record<string, unknown>;
+    return (
+      typeof fields["id"] === "string" &&
+      fields["id"].length <= 1000 &&
+      validSources(fields["sources"]) &&
+      Array.isArray(fields["cells"]) &&
+      fields["cells"].length > 0 &&
+      fields["cells"].length <= 10_000 &&
+      fields["cells"].every((cell: unknown) => {
+        if (typeof cell !== "object" || cell === null) return false;
+        const data = cell as Record<string, unknown>;
+        return (
+          typeof data["text"] === "string" &&
+          data["text"].length <= 5_000_000 &&
+          validSources(data["sources"])
+        );
+      })
+    );
+  });
+}
 
 // 检查解析服务响应，禁止把损坏的协议或图片资源写入文档。
 function validateResult(value: unknown): DoclingResult {
@@ -92,6 +141,12 @@ function validateResult(value: unknown): DoclingResult {
     ) {
       throw new Error("Docling 返回了无效结构块");
     }
+    if (
+      ("sources" in block && !validSources(block.sources)) ||
+      ("table" in block && !validTable(block.table))
+    ) {
+      throw new Error("Docling 返回了无效结构块来源或表格");
+    }
   }
   for (const image of result["images"] as unknown[]) {
     if (
@@ -144,6 +199,7 @@ async function readResponse(response: Response): Promise<unknown> {
 export async function parseDoclingDocument(
   buffer: Buffer,
   format: "pdf" | "docx" | "md",
+  excludedPages: number[] = [],
 ): Promise<ParsedDocument> {
   const prepared = format === "md" ? await prepareMarkdownImages(buffer.toString("utf8")) : null;
   const endpoint = new URL(
@@ -175,6 +231,30 @@ export async function parseDoclingDocument(
     );
   }
   result.warnings.push(...(prepared?.warnings ?? []));
+  if (excludedPages.length > 0) {
+    const excluded = new Set(excludedPages);
+    // 扫描页由整页 OCR 接管，在图片回填前移除相关节点和标记，避免重复识别整页图片。
+    const removedMarkers = new Set<string>();
+    result.blocks = result.blocks.filter((block) => {
+      const matches = block.pageNumbers.filter((page) => excluded.has(page));
+      if (matches.length > 0 && matches.length !== block.pageNumbers.length)
+        throw new Error("PDF 节点跨越文字与扫描页，需要整篇 OCR");
+      if (matches.length === 0) return true;
+      for (const match of block.markdown.matchAll(
+        new RegExp(`<!-- KNOWFLOW_IMAGE:${result.nonce}:\\d+ -->`, "g"),
+      ))
+        removedMarkers.add(match[0]);
+      return false;
+    });
+    result.images = result.images.filter((image) => !removedMarkers.has(image.marker));
+    result.pages = result.pages.map((page) => ({
+      ...page,
+      markdown: [...removedMarkers].reduce(
+        (text, marker) => text.replaceAll(marker, ""),
+        page.markdown,
+      ),
+    }));
+  }
   return backfillDoclingImages(result, format);
 }
 
@@ -185,7 +265,6 @@ export async function backfillDoclingImages(
   describe: ImageDescriber = describeImageWithVision,
 ): Promise<ParsedDocument> {
   const stats = newVisionStats();
-  const budget = newVisionBudget();
   const cache = new Map<string, string>();
   const markerDescriptions = new Map<string, string>();
   const images = new Map(result.images.map((image) => [image.marker, image]));
@@ -220,7 +299,6 @@ export async function backfillDoclingImages(
               height: dimensions.height,
               skipDecorative: true,
             },
-            budget,
             stats,
           )) ?? "";
       } catch {
@@ -255,7 +333,34 @@ export async function backfillDoclingImages(
     );
   }
   const structuredBlocks: ParsedContentBlock[] = [];
-  for (const block of result.blocks) {
+  for (const [index, rawBlock] of result.blocks.entries()) {
+    // 非 PDF 的 Docling provenance 可能代表工作表或虚拟页面，不能映射为物理页码。
+    const block = ensureBlockSources(
+      format === "pdf"
+        ? rawBlock
+        : {
+            ...rawBlock,
+            pageNumbers: [],
+            ...(rawBlock.sources === undefined
+              ? {}
+              : { sources: rawBlock.sources.map((source) => ({ ...source, pageNumbers: [] })) }),
+          },
+      index,
+    );
+    if (block.table !== undefined) {
+      for (const row of [block.table.header, ...block.table.rows]) {
+        if (format !== "pdf")
+          row.sources = row.sources.map((source) => ({ ...source, pageNumbers: [] }));
+        for (const cell of row.cells) {
+          if (format !== "pdf")
+            cell.sources = cell.sources.map((source) => ({ ...source, pageNumbers: [] }));
+          let text = cell.text;
+          for (const match of cell.text.matchAll(markerPattern))
+            text = text.replace(match[0], await describeMarker(match[0]));
+          cell.text = text;
+        }
+      }
+    }
     let position = 0;
     const parts: string[] = [];
     for (const match of block.markdown.matchAll(markerPattern)) {

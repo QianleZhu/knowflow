@@ -57,7 +57,6 @@ export async function prepareMarkdownImages(
   const warnings = new Set<string>();
   const replacements: { start: number; end: number; text: string }[] = [];
   const cache = new Map<string, string | null>();
-  let downloads = 0;
   for (const node of images) {
     if (node.type !== "image" && node.type !== "imageReference") continue;
     const source =
@@ -72,15 +71,10 @@ export async function prepareMarkdownImages(
     let data = cache.get(source);
     if (data === undefined) {
       data = null;
-      if (downloads < 20) {
-        downloads += 1;
-        try {
-          data = await loadRemoteImage(source);
-        } catch {
-          warnings.add("markdown_image_download_failed");
-        }
-      } else {
-        warnings.add("markdown_image_download_limit_reached");
+      try {
+        data = await loadRemoteImage(source);
+      } catch {
+        warnings.add("markdown_image_download_failed");
       }
       cache.set(source, data);
     }

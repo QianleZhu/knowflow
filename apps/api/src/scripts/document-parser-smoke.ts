@@ -24,10 +24,14 @@ async function main(): Promise<void> {
   const fileId = randomUUID();
   // 按显式参数验证不同格式，统一走真实处理器与向量写入链路。
   const sourceType = process.argv[2] ?? "txt";
+  const fixturePath = process.argv[3];
+  const expectedExpenseRows = Number(process.argv[4] ?? "0");
   assert.ok(sourceType === "txt" || sourceType === "pdf" || sourceType === "docx");
   const expectedParser =
     sourceType === "pdf"
-      ? "docling"
+      ? fixturePath === undefined || process.argv.includes("--native")
+        ? "docling"
+        : "pdf-parse"
       : sourceType === "docx"
         ? "docling"
         : "plain-text";
@@ -52,12 +56,14 @@ async function main(): Promise<void> {
     const buffer =
       sourceType === "txt"
         ? Buffer.from(text)
-        : await readFile(
-            new URL(
-              `../modules/domains/document/parsers/fixtures/${sourceType === "pdf" ? "text.pdf" : "structured.docx"}`,
-              import.meta.url,
-            ),
-          );
+        : fixturePath === undefined
+          ? await readFile(
+              new URL(
+                `../modules/domains/document/parsers/fixtures/${sourceType === "pdf" ? "text.pdf" : "structured.docx"}`,
+                import.meta.url,
+              ),
+            )
+          : await readFile(fixturePath);
     await mkdir(storageRoot, { recursive: true });
     await writeFile(absolutePath, buffer);
     await db.insert(files).values({
@@ -118,6 +124,12 @@ async function main(): Promise<void> {
       assert.deepEqual(childMetadata["headingPath"], parent.headingPath);
       assert.equal(childMetadata["pageStart"], parent.pageStart);
       assert.equal(childMetadata["pageEnd"], parent.pageEnd);
+      const parentMetadata = parent.metadata as Record<string, unknown>;
+      assert.deepEqual(childMetadata["pageNumbers"], parentMetadata["pageNumbers"]);
+      assert.deepEqual(childMetadata["sources"], parentMetadata["sources"]);
+      assert.deepEqual(childMetadata["tableIds"], parentMetadata["tableIds"]);
+      assert.deepEqual(childMetadata["tableRecords"], parentMetadata["tableRecords"]);
+      assert.equal(childMetadata["pageScope"], "parent");
       assert.ok(child.content.length > 0);
     }
     assert.ok(
@@ -125,21 +137,67 @@ async function main(): Promise<void> {
       "父块必须有内容且不超过项目上限",
     );
     if (sourceType === "pdf") {
-      assert.equal((document.metadata as Record<string, unknown>)["pdfPageCount"], 1);
+      const pageCount = Number((document.metadata as Record<string, unknown>)["pdfPageCount"]);
+      assert.ok(pageCount >= 1);
+      if (fixturePath === undefined) assert.equal(pageCount, 1);
       assert.ok(
-        parents.every((parent) => parent.pageStart === 1 && parent.pageEnd === 1),
-        "真实单页 PDF 的父块页码必须映射到第 1 页",
+        parents.every(
+          (parent) =>
+            parent.pageStart !== null &&
+            parent.pageEnd !== null &&
+            parent.pageStart >= 1 &&
+            parent.pageEnd <= pageCount,
+        ),
+        "PDF 父块页码必须落在真实物理页范围内",
       );
     }
     if (sourceType === "txt") {
-      assert.equal(parents.length, 2);
-      assert.ok(children.length >= 2);
+      assert.equal(parents.length, 1);
+      assert.ok(children.length >= 1);
+      assert.deepEqual(parents[0]?.headingPath, [], "TXT 的 # 标记不能猜测为标题");
     }
     assert.ok(
       children.every(
         (chunk) => chunk.embeddingStatus === "completed" && chunk.embedding?.length === 1024,
       ),
     );
+    if (fixturePath !== undefined) {
+      const report = {
+        metadata: document.metadata,
+        parents: parents.map((parent) => ({
+          id: parent.id,
+          content: parent.content,
+          headingPath: parent.headingPath,
+          metadata: parent.metadata,
+        })),
+        children: children.map((child) => ({
+          parentChunkId: child.parentChunkId,
+          content: child.content,
+          metadata: child.metadata,
+        })),
+      };
+      const reportPath = new URL(
+        `../../../../output/docling/${encodeURIComponent(path.parse(fixturePath).name)}-report.json`,
+        import.meta.url,
+      );
+      await mkdir(new URL(".", reportPath), { recursive: true });
+      await writeFile(reportPath, JSON.stringify(report, null, 2));
+    }
+    // 专项费用表样本用唯一 CODE 编号核对真实 OCR 内容覆盖；默认不要求其他文档包含此类编号。
+    if (expectedExpenseRows > 0) {
+      const expected = Array.from(
+        { length: expectedExpenseRows },
+        (_, index) => `CODE${String(index + 1).padStart(3, "0")}`,
+      );
+      const parentCodes = parents
+        .flatMap((parent) => [...parent.content.matchAll(/CODE\d{3}/g)].map((match) => match[0]))
+        .sort();
+      const childCodes = children
+        .flatMap((child) => [...child.content.matchAll(/CODE\d{3}/g)].map((match) => match[0]))
+        .sort();
+      assert.deepEqual(parentCodes, expected, "父块费用表不能丢失或重复数据行");
+      assert.deepEqual(childCodes, expected, "子块费用表不能丢失或重复数据行");
+    }
     // 旧版本任务和重复任务均应跳过，已持久化正文保持不变。
     await processDocument(`${documentId}__processVersion1`);
     await processDocument(`${documentId}__processVersion2`);
@@ -156,6 +214,10 @@ async function main(): Promise<void> {
         children: children.length,
         parentPageRanges: parents.map((parent) => [parent.pageStart, parent.pageEnd]),
         childParentLinksComplete: children.every((child) => parentsById.has(child.parentChunkId)),
+        parentPages: parents.map(
+          (parent) => (parent.metadata as Record<string, unknown>)["pageNumbers"],
+        ),
+        sourcesInherited: true,
         embeddingDimension: 1024,
         staleAndRepeatedJobsSkipped: true,
       }),

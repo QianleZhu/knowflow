@@ -62,8 +62,7 @@ async function main(): Promise<void> {
     // 走正式注册表，覆盖服务调用、图片 OCR、清洗以及分块入口。
     // 无 OCR 配置时可显式使用描述替身，只验证真实解析和回填，不声称真实识别。
     const parsed = structureOnly
-      ? await backfillDoclingImages(structure, format, (_, budget, stats) => {
-          budget.used += 1;
+      ? await backfillDoclingImages(structure, format, (_, stats) => {
           stats.attempted += 1;
           stats.inserted += 1;
           return Promise.resolve("测试描述：INPUT 42 → OUTPUT 84。");
@@ -74,7 +73,7 @@ async function main(): Promise<void> {
           documentId: "docling-smoke",
           title: "图片上下文验证",
         });
-    assert.equal(parsed.metadata.parser, "docling");
+    assert.equal(parsed.metadata.parser, format === "md" && !structureOnly ? "remark" : "docling");
     assert.equal(
       parsed.metadata.visionImageInsertedCount,
       1,
@@ -93,7 +92,7 @@ async function main(): Promise<void> {
       assert.doesNotMatch(parsed.text, /KNOWFLOW_PAGE_BREAK/);
     }
     assert.ok(parsed.structuredBlocks, `${format} 没有返回 Docling 结构块`);
-    const children = splitParentChunks(parsed.text, parsed.structuredBlocks).flatMap((parent) =>
+    const children = splitParentChunks(parsed.structuredBlocks).flatMap((parent) =>
       splitChildChunks(parent.content),
     );
     assert.ok(

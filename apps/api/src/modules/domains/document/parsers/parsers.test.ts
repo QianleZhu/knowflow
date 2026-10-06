@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import { readFile } from "node:fs/promises";
 import * as XLS from "@e965/xlsx";
 import { toParsedDocument } from "./cleaner.js";
+import { buildTextPdf } from "./fixtures/pdf-fixtures.js";
 import { PDFParse } from "pdf-parse";
 import {
   detectDocumentUploadKind,
@@ -17,7 +18,7 @@ import { parseDoclingDocument } from "./docling.parser.js";
 import { readImageDimensions } from "./image-dimensions.js";
 import { parseDocumentBuffer } from "./registry.js";
 import type { ParserContext } from "./types.js";
-import { describeImageWithVision, newVisionBudget, newVisionStats } from "./vision-ocr.js";
+import { describeImageWithVision, newVisionStats } from "./vision-ocr.js";
 
 const context: ParserContext = {
   sourceType: "txt",
@@ -25,50 +26,6 @@ const context: ParserContext = {
   documentId: "parser-regression",
   title: "解析回归",
 };
-
-// 构造仅含 ASCII 文本的多页 PDF，用于验证 Docling 的跨页来源信息。
-function buildTextPdf(pageTexts: string[]): Buffer {
-  const pageObjectIds = pageTexts.map((_, index) => 3 + index * 2);
-  const fontObjectId = 3 + pageTexts.length * 2;
-  const objects: string[] = [];
-  objects[1] = "<< /Type /Catalog /Pages 2 0 R >>";
-  objects[2] =
-    "<< /Type /Pages /Kids [" +
-    pageObjectIds.map((id) => `${String(id)} 0 R`).join(" ") +
-    `] /Count ${String(pageTexts.length)} >>`;
-
-  pageTexts.forEach((pageText, index) => {
-    const pageObjectId = pageObjectIds[index];
-    assert.ok(pageObjectId);
-    const contentObjectId = pageObjectId + 1;
-    // PDF 字符串中的反斜线和括号必须转义，避免破坏内容流。
-    const escapedText = pageText.replace(/[\\()]/g, "\\$&");
-    const contentStream = `BT /F1 12 Tf 72 720 Td (${escapedText}) Tj ET`;
-    objects[pageObjectId] =
-      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 ${String(fontObjectId)} 0 R >> >> /Contents ${String(contentObjectId)} 0 R >>`;
-    objects[contentObjectId] =
-      `<< /Length ${String(Buffer.byteLength(contentStream, "ascii"))} >>\nstream\n${contentStream}\nendstream`;
-  });
-  objects[fontObjectId] =
-    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>";
-
-  let pdf = "%PDF-1.4\n";
-  const offsets = [0];
-  // xref 保存对象在 PDF 字节流中的偏移，供解析器准确读取页面树。
-  for (let objectId = 1; objectId < objects.length; objectId += 1) {
-    offsets[objectId] = Buffer.byteLength(pdf, "ascii");
-    const object = objects[objectId];
-    assert.ok(object);
-    pdf += `${String(objectId)} 0 obj\n${object}\nendobj\n`;
-  }
-  const xrefOffset = Buffer.byteLength(pdf, "ascii");
-  pdf += `xref\n0 ${String(objects.length)}\n0000000000 65535 f \n`;
-  for (let objectId = 1; objectId < objects.length; objectId += 1) {
-    pdf += `${String(offsets[objectId]).padStart(10, "0")} 00000 n \n`;
-  }
-  pdf += `trailer\n<< /Size ${String(objects.length)} /Root 1 0 R >>\nstartxref\n${String(xrefOffset)}\n%%EOF\n`;
-  return Buffer.from(pdf, "ascii");
-}
 
 // 构造三种 WebP 编码的尺寸头，独立验证 image-size 的格式识别。
 function webpHeader(format: "VP8X" | "VP8L" | "VP8 ", width: number, height: number): Buffer {
@@ -102,9 +59,8 @@ void describe("image-size and WebP regression", () => {
     });
   }
 
-  void it("skips small WebP before calling OCR or consuming budget", async () => {
+  void it("skips small WebP before calling OCR", async () => {
     const buffer = webpHeader("VP8X", 32, 32);
-    const budget = newVisionBudget();
     const stats = newVisionStats();
     const text = await describeImageWithVision(
       {
@@ -114,13 +70,11 @@ void describe("image-size and WebP regression", () => {
         ...readImageDimensions(buffer),
         skipDecorative: true,
       },
-      budget,
       stats,
     );
     assert.equal(text, null);
     assert.equal(stats.skippedDecorative, 1);
     assert.equal(stats.attempted, 0);
-    assert.equal(budget.used, 0);
   });
 
   void it("keeps unknown dimensions safe for damaged and empty inputs", () => {
@@ -155,14 +109,20 @@ void describe("parser registry and shared spreadsheet regression", () => {
       );
       const blocks = parsed.structuredBlocks ?? [];
       const headings = blocks.filter((block) => block.kind === "heading");
-      const parents = splitParentChunks(parsed.text, blocks);
+      const parents = splitParentChunks(blocks);
 
-      assert.deepEqual(headings.map((block) => block.level), [1, 2, 3]);
-      assert.deepEqual(parents.map((parent) => parent.content), [
-        "# 一级标题",
-        "## 二级标题",
-        "### 三级标题\n\n正文内容",
-      ]);
+      assert.deepEqual(
+        headings.map((block) => block.level),
+        [1, 2, 3],
+      );
+      assert.deepEqual(
+        parents.map((parent) => parent.content),
+        [
+          "# 一级标题",
+          "# 一级标题\n\n## 二级标题",
+          "# 一级标题\n\n## 二级标题\n\n### 三级标题\n\n正文内容",
+        ],
+      );
       assert.deepEqual(parents[2]?.headingPath, ["一级标题", "二级标题", "三级标题"]);
     },
   );
@@ -183,10 +143,12 @@ void describe("parser registry and shared spreadsheet regression", () => {
       assert.equal(parsed.metadata.markdownDialect, "gfm");
       assert.ok((parsed.structuredBlocks?.length ?? 0) > 0);
       assert.ok(parsed.structuredBlocks?.some((block) => block.pageNumbers.includes(1)));
-      const parents = splitParentChunks(parsed.text, parsed.structuredBlocks);
+      const parents = splitParentChunks(parsed.structuredBlocks);
       assert.ok(parents.length > 0);
       assert.ok(parents.every((parent) => parent.pageStart === 1 && parent.pageEnd === 1));
-      assert.ok(parents.every((parent) => parent.content.length > 0 && parent.content.length <= 4000));
+      assert.ok(
+        parents.every((parent) => parent.content.length > 0 && parent.content.length <= 4000),
+      );
       const parentChildPairs = parents.flatMap((parent) =>
         splitChildChunks(parent.content).map((child) => ({ parent, child })),
       );
@@ -216,14 +178,16 @@ void describe("parser registry and shared spreadsheet regression", () => {
         },
       );
       const blocks = parsed.structuredBlocks ?? [];
-      const parents = splitParentChunks(parsed.text, blocks);
+      const parents = splitParentChunks(blocks);
 
       assert.equal(parsed.metadata.parser, "docling");
       assert.equal(parsed.metadata.pdfPageCount, 2);
       assert.ok(blocks.some((block) => block.pageNumbers.includes(1)));
       assert.ok(blocks.some((block) => block.pageNumbers.includes(2)));
       assert.ok(parents.length > 0);
-      assert.ok(parents.every((parent) => parent.content.length > 0 && parent.content.length <= 4000));
+      assert.ok(
+        parents.every((parent) => parent.content.length > 0 && parent.content.length <= 4000),
+      );
 
       for (const [marker, expectedPage] of [
         ["UNIQUEPAGEONE", 1],
@@ -271,7 +235,7 @@ void describe("parser registry and shared spreadsheet regression", () => {
     const buffer = await readFile(new URL("./fixtures/text.pdf", import.meta.url));
     await assert.rejects(
       parseDocumentBuffer(buffer, { ...context, sourceType: "pdf" }),
-      /扫描件 PDF 视觉 OCR 失败/,
+      /PDF 第 1 页渲染失败/,
     );
     assert.equal(screenshot.mock.callCount(), 1);
   });

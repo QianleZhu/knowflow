@@ -4,6 +4,7 @@ import { buildPdfTextWithVisualDescriptions, isScannedPdfText } from "./parsers/
 import { cleanParsedText } from "./parsers/cleaner.js";
 import { isDecorativeImage } from "./parsers/vision-ocr.js";
 import { readImageDimensions } from "./parsers/image-dimensions.js";
+import { parseMarkdownBlocks, parsePlainTextBlocks } from "./parsers/structured-content.js";
 import { splitParentChunks } from "./document-chunker.js";
 
 const pageBreak = (page: number): string => `[[KNOWFLOW_PAGE_BREAK:${String(page)}]]`;
@@ -55,78 +56,49 @@ void describe("document text cleaning", () => {
   });
 });
 
+// 节点来源优先于正文标记：父块只计算实际内容页，重复标题是上下文。
 void describe("document chunking", () => {
-  void it("detects Chinese and numbered headings into heading paths", () => {
-    const chunks = splitParentChunks(
-      [
-        "第一章 总则",
-        "这里是总则正文，描述制度背景。",
-        "",
-        "一、基本原则",
-        "这里是基本原则正文，描述原则。",
-        "",
-        "（一）管理要求",
-        "这里是管理要求正文，描述要求。",
-        "",
-        "1.1 适用范围",
-        "这里是适用范围正文，描述适用对象。",
-      ].join("\n"),
+  void it("keeps the full heading hierarchy including skipped levels", () => {
+    const blocks = parseMarkdownBlocks(
+      "# 第一章 总则\n\n正文\n\n### 管理要求\n\n说明\n\n## 适用范围\n\n范围正文",
     );
-
-    assert.equal(chunks.length, 4);
-    assert.deepEqual(chunks[0]?.headingPath, ["第一章 总则"]);
-    assert.deepEqual(chunks[1]?.headingPath, ["第一章 总则", "一、基本原则"]);
-    assert.deepEqual(chunks[2]?.headingPath, ["第一章 总则", "一、基本原则", "（一）管理要求"]);
-    assert.deepEqual(chunks[3]?.headingPath, ["第一章 总则", "1.1 适用范围"]);
-  });
-
-  void it("does not detect normal short sentences as headings", () => {
-    const chunks = splitParentChunks(
-      ["第一章 总则", "普通短句", "这里继续说明普通短句，不应该产生新的标题路径。"].join("\n"),
+    const parents = splitParentChunks(blocks);
+    assert.deepEqual(
+      parents.map((parent) => parent.headingPath),
+      [["第一章 总则"], ["第一章 总则", "管理要求"], ["第一章 总则", "适用范围"]],
     );
-
-    assert.equal(chunks.length, 1);
-    const chunk = chunks[0];
-    assert.ok(chunk);
-    assert.deepEqual(chunk.headingPath, ["第一章 总则"]);
-    assert.match(chunk.content, /普通短句/);
+    assert.match(parents[1]?.content ?? "", /^# 第一章 总则\n\n### 管理要求/);
   });
-
-  void it("fills parent chunk page ranges from page markers", () => {
-    const chunks = splitParentChunks(
-      ["第一章 总则", "第一页正文内容。", pageBreak(2), "第二章 范围", "第二页正文内容。"].join(
-        "\n",
+  void it("does not guess headings in TXT comments or numbered paragraphs", () => {
+    const blocks = parsePlainTextBlocks("# 代码注释\n    return 1\n\n第一章只是普通文本\n1. 正文");
+    assert.ok(blocks.every((block) => block.kind === "paragraph"));
+    const parents = splitParentChunks(blocks);
+    assert.deepEqual(parents[0]?.headingPath, []);
+    assert.match(parents[0].content, / {4}return 1/);
+  });
+  void it("merges short same-section paragraphs across pages", () => {
+    const blocks = [
+      ...parseMarkdownBlocks("# 总则\n\n第一页正文。", [1], "page1"),
+      ...parseMarkdownBlocks("第二页正文。", [2], "page2"),
+    ];
+    const parents = splitParentChunks(blocks);
+    assert.equal(parents.length, 1);
+    assert.deepEqual(parents[0]?.pageNumbers, [1, 2]);
+  });
+  void it("does not widen later chunks to the page of a repeated heading", () => {
+    const blocks = [
+      ...parseMarkdownBlocks("# 长章节", [1], "page1"),
+      ...[1, 2, 3].flatMap((page) =>
+        parseMarkdownBlocks("制度正文内容".repeat(320), [page], `page${String(page)}`),
       ),
+    ];
+    const parents = splitParentChunks(blocks);
+    assert.equal(parents.length, 3);
+    assert.deepEqual(
+      parents.map((parent) => parent.pageNumbers),
+      [[1], [2], [3]],
     );
-
-    const first = chunks[0];
-    const second = chunks[1];
-    assert.ok(first);
-    assert.ok(second);
-    assert.equal(first.pageStart, 1);
-    assert.equal(first.pageEnd, 1);
-    assert.equal(second.pageStart, 2);
-    assert.equal(second.pageEnd, 2);
-  });
-
-  void it("keeps page ranges granular when one long section splits across pages", () => {
-    const longLine = "制度正文内容".repeat(320);
-    const chunks = splitParentChunks(
-      ["第一章 长章节", longLine, pageBreak(2), longLine, pageBreak(3), longLine].join("\n"),
-    );
-
-    assert.ok(chunks.length >= 2);
-    const first = chunks[0];
-    const second = chunks[1];
-    assert.ok(first);
-    assert.ok(second);
-    assert.equal(first.pageStart, 1);
-    assert.equal(first.pageEnd, 1);
-    assert.equal(second.pageStart, 2);
-    assert.notDeepEqual(
-      chunks.map((chunk) => [chunk.pageStart, chunk.pageEnd]),
-      chunks.map(() => [1, 3]),
-    );
+    assert.ok(parents.every((parent) => parent.content.startsWith("# 长章节")));
   });
 });
 
@@ -155,14 +127,8 @@ void describe("document multimodal helpers", () => {
       ],
     );
 
-    assert.match(
-      text,
-      /<!-- KNOWFLOW_PAGE_BREAK:1 -->\n\n第一页正文\n\n## PDF 第 1 页图片 Y\n\n第一页图片描述/,
-    );
-    assert.match(
-      text,
-      /<!-- KNOWFLOW_PAGE_BREAK:2 -->\n\n第二页正文\n\n## PDF 第 2 页图片 X\n\n第二页图片描述/,
-    );
+    assert.match(text, /<!-- KNOWFLOW_PAGE_BREAK:1 -->\n\n第一页正文\n\n第一页图片描述/);
+    assert.match(text, /<!-- KNOWFLOW_PAGE_BREAK:2 -->\n\n第二页正文\n\n第二页图片描述/);
   });
 
   void it("reads PNG dimensions for decorative filtering", () => {

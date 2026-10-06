@@ -4,11 +4,12 @@ import type { ParsedContentBlock } from "../document-blocks.js";
 
 export type ParsedDocument = {
   text: string;
-  // Docling 格式额外保留顺序、标题层级和来源页码；其他解析器继续使用 Markdown 兜底。
+  // 每种生产解析器都必须提供结构块；封装清洗工具的中间结果允许暂时没有节点。
   structuredBlocks?: ParsedContentBlock[];
   metadata: {
     parser:
       | "docling"
+      | "remark"
       | "pdf-parse"
       | "@pdf2md/core"
       | "word-to-markdown"
@@ -34,12 +35,12 @@ export type ParsedDocument = {
     pageInfoUnavailable?: true;
     pdfPageCount?: number;
     scannedPdfDetected?: true;
-    visionImageLimit?: number;
+    ocrPageNumbers?: number[];
+    blankPageNumbers?: number[];
     visionImageCount?: number;
     visionImageInsertedCount?: number;
     visionImageSkippedCount?: number;
     visionImageFailedCount?: number;
-    visionImageTruncated?: true;
     multimodalWarnings?: string[];
   };
 };
@@ -67,11 +68,7 @@ export type VisionImageInput = {
   width: number | null;
   height: number | null;
   skipDecorative: boolean;
-};
-
-export type VisionBudget = {
-  limit: number;
-  used: number;
+  prompt?: string;
 };
 
 export type VisionStats = {
@@ -79,7 +76,6 @@ export type VisionStats = {
   inserted: number;
   skippedDecorative: number;
   failed: number;
-  truncated: boolean;
   warnings: string[];
 };
 

@@ -285,11 +285,11 @@ async function replaceChunks(
   parsed: ParsedDocument,
   processVersion: number,
 ): Promise<void> {
-  // Docling 文档使用树节点和节点页码；其他解析器继续走 Markdown 兼容路径。
-  if (parsed.metadata.parser === "docling" && parsed.structuredBlocks === undefined) {
-    throw new Error("Docling 解析结果缺少结构块，拒绝使用 Markdown 切块");
+  // 所有解析器都必须提供结构块，禁止因某种格式遗漏节点而回到逐行猜测。
+  if (parsed.structuredBlocks === undefined) {
+    throw new Error("解析结果缺少结构块，拒绝使用 Markdown 切块");
   }
-  const parents = splitParentChunks(parsed.text, parsed.structuredBlocks);
+  const parents = splitParentChunks(parsed.structuredBlocks);
   // 父子片段必须一起替换，任一插入失败时回滚整个事务。
   await db.transaction(async (tx) => {
     const [currentDocument] = await tx
@@ -320,6 +320,20 @@ async function replaceChunks(
             chunkerVersion: CHUNKER_VERSION,
             boundaryType: parent.boundaryType,
             processVersion,
+            pageNumbers: parent.pageNumbers,
+            sources: parent.sources,
+            tableIds: parent.tableIds,
+            tableRecords: parent.blocks.flatMap((block) =>
+              block.tableRecord === undefined
+                ? []
+                : [
+                    {
+                      rowId: block.tableRecord.rowId,
+                      columnIndex: block.tableRecord.columnIndex,
+                      columnName: block.tableRecord.columnName,
+                    },
+                  ],
+            ),
           },
         })
         .returning({ id: parentChunks.id });
@@ -327,7 +341,7 @@ async function replaceChunks(
         throw new Error("创建文档父片段失败");
       }
 
-      const children = splitChildChunks(parent.content);
+      const children = splitChildChunks(parent.content, parent);
       if (children.length === 0) {
         throw new Error("文档切分未生成子片段");
       }
@@ -348,6 +362,21 @@ async function replaceChunks(
             processVersion,
             pageStart: parent.pageStart,
             pageEnd: parent.pageEnd,
+            pageNumbers: parent.pageNumbers,
+            sources: parent.sources,
+            tableIds: parent.tableIds,
+            pageScope: "parent",
+            tableRecords: parent.blocks.flatMap((block) =>
+              block.tableRecord === undefined
+                ? []
+                : [
+                    {
+                      rowId: block.tableRecord.rowId,
+                      columnIndex: block.tableRecord.columnIndex,
+                      columnName: block.tableRecord.columnName,
+                    },
+                  ],
+            ),
           },
           embeddingStatus: "pending" as const,
         })),

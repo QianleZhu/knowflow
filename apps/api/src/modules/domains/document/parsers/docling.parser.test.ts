@@ -1,4 +1,4 @@
-// Docling 图片原位回填回归：顺序、去重、失败、预算、页码和服务协议。
+// Docling 图片原位回填回归：顺序、去重、失败、完整遍历、页码和服务协议。
 import assert from "node:assert/strict";
 import { it } from "node:test";
 import {
@@ -8,6 +8,7 @@ import {
 } from "./docling.parser.js";
 import { prepareMarkdownImages } from "./markdown-images.js";
 import { splitParentChunks, splitChildChunks } from "../document-chunker.js";
+import type { ParsedContentBlock } from "../document-blocks.js";
 
 const nonce = "a".repeat(32);
 // 构造 WebP 尺寸头验证字节类型识别，视觉内容本身由单元测试替身提供。
@@ -43,10 +44,9 @@ void it("inserts raw descriptions between related paragraphs, without synthetic 
   const parsed = await backfillDoclingImages(
     result(`# 流程\n\n图前正文\n\n${marker(0)}\n\n图后正文`),
     "pdf",
-    (input, budget, stats) => {
+    (input, stats) => {
       assert.equal(input.mimeType, "image/webp");
       assert.equal(input.width, 320);
-      budget.used += 1;
       stats.attempted += 1;
       stats.inserted += 1;
       return Promise.resolve("图片显示：用户 → API → 数据库，价格 $&。");
@@ -58,7 +58,7 @@ void it("inserts raw descriptions between related paragraphs, without synthetic 
   assert.doesNotMatch(parsed.text, /KNOWFLOW_IMAGE|## 文档图片|!\[/);
   assert.match(parsed.text, /KNOWFLOW_PAGE_BREAK:1/);
   assert.ok(parsed.structuredBlocks);
-  const parents = splitParentChunks(parsed.text, parsed.structuredBlocks);
+  const parents = splitParentChunks(parsed.structuredBlocks);
   assert.equal(parents.length, 1);
   assert.ok(
     splitChildChunks(parents[0]?.content ?? "").some((chunk) =>
@@ -100,26 +100,38 @@ void it("filters decorative WebP through the actual OCR helper before model call
   assert.doesNotMatch(parsed.text, /KNOWFLOW_IMAGE/);
 });
 
-void it("keeps budgets shared across all pages and removes truncated nodes", async () => {
-  const data = result("", 21);
+void it("backfills every image across more than twenty pages without truncating later pages", async () => {
+  const data = result("", 25);
   data.images = data.images.map((entry, index) => ({ ...entry, base64: image(320 + index, 240) }));
   data.pages = data.images.map((entry, index) => ({
     pageNumber: index + 1,
     markdown: `正文 ${String(index)}\n\n${entry.marker}`,
   }));
-  const parsed = await backfillDoclingImages(data, "pdf", (_, budget, stats) => {
-    if (budget.used >= budget.limit) {
-      stats.truncated = true;
-      return Promise.resolve(null);
-    }
-    budget.used += 1;
+  data.blocks = data.images.map((entry, index) => ({
+    kind: "picture",
+    markdown: entry.marker,
+    level: null,
+    pageNumbers: [index + 1],
+  }));
+  const parsed = await backfillDoclingImages(data, "pdf", (_, stats) => {
     stats.attempted += 1;
     stats.inserted += 1;
-    return Promise.resolve("图的内容");
+    return Promise.resolve(`第 ${String(stats.attempted)} 张图的内容`);
   });
-  assert.equal(parsed.metadata.visionImageCount, 20);
-  assert.equal(parsed.metadata.visionImageTruncated, true);
-  assert.equal(parsed.metadata.pdfPageCount, 21);
+  assert.equal(parsed.metadata.visionImageCount, 25);
+  assert.equal(parsed.metadata.visionImageInsertedCount, 25);
+  assert.equal(parsed.metadata.pdfPageCount, 25);
+  assert.ok(parsed.structuredBlocks);
+  assert.equal(parsed.structuredBlocks.length, 25);
+  for (let index = 1; index <= 25; index += 1) {
+    assert.ok(parsed.text.includes(`第 ${String(index)} 张图的内容`));
+    const block: ParsedContentBlock | undefined = parsed.structuredBlocks[index - 1];
+    assert.ok(block);
+    assert.equal(block.markdown, `第 ${String(index)} 张图的内容`);
+    assert.deepEqual(block.pageNumbers, [index]);
+  }
+  assert.ok(!("visionImageLimit" in parsed.metadata));
+  assert.ok(!("visionImageTruncated" in parsed.metadata));
   assert.doesNotMatch(parsed.text, /KNOWFLOW_IMAGE/);
 });
 

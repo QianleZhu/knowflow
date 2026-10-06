@@ -1,10 +1,4 @@
-import {
-  db,
-  decryptApiKey,
-  modelCatalog,
-  modelProviders,
-  modelUsagePolicies,
-} from "@knowflow/db";
+import { db, decryptApiKey, modelCatalog, modelProviders, modelUsagePolicies } from "@knowflow/db";
 import type { ModelUsageType } from "@knowflow/shared";
 import { and, eq } from "drizzle-orm";
 import OpenAI from "openai";
@@ -13,7 +7,8 @@ import type { ChatCompletionMessageParam } from "openai/resources/chat/completio
 type ModelUsageOptions = {
   model?: string;
   temperature?: number;
-  maxOutputTokens?: number;
+  // null 表示明确省略输出上限，undefined 则沿用模型用途配置。
+  maxOutputTokens?: number | null;
 };
 
 export type ResolvedModelConfig = {
@@ -49,13 +44,17 @@ export type ModelConfigResolverSources = {
 
 export type ModelUsageMessage = ChatCompletionMessageParam;
 
+// 根据用途配置调用模型；允许 OCR 显式取消项目侧的输出 token 上限。
 export async function callModelByUsage(
   usageType: ModelUsageType,
   messages: ModelUsageMessage[],
   options: ModelUsageOptions = {},
+  resolveConfig: typeof resolveModelConfig = resolveModelConfig,
 ): Promise<string> {
-  const config = await resolveModelConfig(usageType);
-  const maxTokens = options.maxOutputTokens ?? config.maxOutputTokens;
+  const config = await resolveConfig(usageType);
+  // 显式 null 不能通过 ?? 回退，否则 OCR 仍会受到用途配置里的上限影响。
+  const maxTokens =
+    options.maxOutputTokens === null ? null : (options.maxOutputTokens ?? config.maxOutputTokens);
   const response = await new OpenAI({
     apiKey: config.apiKey,
     baseURL: config.baseUrl,
@@ -68,12 +67,16 @@ export async function callModelByUsage(
     ...(maxTokens === null ? {} : { max_tokens: maxTokens }),
   });
 
+  // OCR 的截断响应不能当成完整页面落库；由页面解析器重试或报告失败。
+  if (usageType === "ocr" && response.choices[0]?.finish_reason !== "stop") {
+    throw new Error(
+      `OCR 响应未完整结束（${response.choices[0]?.finish_reason ?? "missing_choice"}）`,
+    );
+  }
   return response.choices[0]?.message.content ?? "";
 }
 
-export async function resolveModelConfig(
-  usageType: ModelUsageType,
-): Promise<ResolvedModelConfig> {
+export async function resolveModelConfig(usageType: ModelUsageType): Promise<ResolvedModelConfig> {
   return resolveModelConfigFromSources(usageType, {
     resolveUsagePolicy,
     resolveCatalogModel,
@@ -122,9 +125,7 @@ export async function resolveModelConfigFromSources(
   throwMissingPolicyError(usageType);
 }
 
-async function resolveUsagePolicy(
-  usageType: ModelUsageType,
-): Promise<UsagePolicy | undefined> {
+async function resolveUsagePolicy(usageType: ModelUsageType): Promise<UsagePolicy | undefined> {
   const [policy] = await db
     .select({
       defaultModelId: modelUsagePolicies.defaultModelId,

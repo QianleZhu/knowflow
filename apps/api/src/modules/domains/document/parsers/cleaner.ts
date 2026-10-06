@@ -96,7 +96,7 @@ function removeRepeatedPageChrome(text: string, warnings: string[]): string {
 }
 
 // 保留制表与换行并移除不可见控制字符。
-function removeControlCharacters(text: string): string {
+export function removeControlCharacters(text: string): string {
   let cleaned = "";
   for (let index = 0; index < text.length; index += 1) {
     const char = text.charAt(index);
@@ -197,30 +197,34 @@ export async function toParsedDocument(
   text: string,
   parser: ParsedDocument["metadata"]["parser"],
   extraMetadata: ParsedDocumentExtraMetadata = {},
-  inputFormat: "text" | "markdown" = "markdown",
+  inputFormat: "text" | "markdown" | "plain" = "markdown",
 ): Promise<ParsedDocument> {
   const rawTextLength = text.length;
   const prepared = prepareRawTextForCleaning(text, parser);
   // 转换库和 OCR 的 Markdown 不再经过纯文本页眉删除、硬换行合并。
   const cleaned =
     inputFormat === "text" ? cleanParsedText(prepared.text) : cleanMarkdownText(prepared.text);
-  const markdown = await format(
-    cleaned.text
-      .split("\n")
-      .map((line) => {
-        const page = pageMarkerNumber(line);
-        return page === null ? line : formatPageMarker(page);
-      })
-      .join("\n"),
-    {
-      parser: "markdown",
-      proseWrap: "preserve",
-      // 仅规范外层排版，保留代码块内部原文。
-      embeddedLanguageFormatting: "off",
-      endOfLine: "lf",
-      tabWidth: 2,
-    },
-  );
+  // TXT 保留原始缩进与编号，不交给 Markdown 格式化器改写正文。
+  const markdown =
+    inputFormat === "plain"
+      ? cleaned.text
+      : await format(
+          cleaned.text
+            .split("\n")
+            .map((line) => {
+              const page = pageMarkerNumber(line);
+              return page === null ? line : formatPageMarker(page);
+            })
+            .join("\n"),
+          {
+            parser: "markdown",
+            proseWrap: "preserve",
+            // 仅规范外层排版，保留代码块内部原文。
+            embeddedLanguageFormatting: "off",
+            endOfLine: "lf",
+            tabWidth: 2,
+          },
+        );
 
   return {
     text: markdown.trimEnd(),
