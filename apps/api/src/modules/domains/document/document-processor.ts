@@ -409,7 +409,6 @@ async function embedChildChunks(
           .update(childChunks)
           .set({
             embedding,
-            searchVector: sql`to_tsvector('simple', ${chunk.content})`,
             embeddingStatus: "completed",
             updatedAt: new Date(),
           })

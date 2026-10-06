@@ -456,7 +456,6 @@ export class KnowledgeImprovementService {
           status: "published",
           metadata,
           embedding,
-          searchVector: sql`to_tsvector('simple', ${this.searchText({ title, summary, content })})`,
           createdBy: user.id,
           updatedBy: user.id,
           verifiedBy: user.id,
@@ -1681,10 +1680,6 @@ export class KnowledgeImprovementService {
 
   private embeddingText(row: { title: string; summary: string | null; content: string }): string {
     return [row.title, row.summary, row.content].filter(Boolean).join("\n\n");
-  }
-
-  private searchText(row: { title: string; summary: string | null; content: string }): string {
-    return [row.title, row.summary, row.content].filter(Boolean).join(" ");
   }
 
   private toTask(row: TaskRow): ImprovementTask {

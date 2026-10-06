@@ -340,7 +340,6 @@ export class KnowledgeItemService {
       .update(knowledgeItems)
       .set({
         embedding,
-        searchVector: sql`to_tsvector('simple', ${this.searchText(row)})`,
         status: "published",
         enabled: true,
         verifiedBy: user.id,
@@ -756,9 +755,5 @@ export class KnowledgeItemService {
 
   private embeddingText(row: Pick<KnowledgeItemRow, "title" | "summary" | "content">): string {
     return [row.title, row.summary, row.content].filter(Boolean).join("\n\n");
-  }
-
-  private searchText(row: Pick<KnowledgeItemRow, "title" | "summary" | "content">): string {
-    return [row.title, row.summary, row.content].filter(Boolean).join(" ");
   }
 }

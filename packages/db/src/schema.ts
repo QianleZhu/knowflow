@@ -2,7 +2,6 @@ import {
   bigint,
   boolean,
   type AnyPgColumn,
-  customType,
   date,
   index,
   integer,
@@ -26,12 +25,6 @@ const timestamps = () => ({
 
 const createdOnly = () => ({
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-});
-
-const tsvector = customType<{ data: string; driverData: string }>({
-  dataType() {
-    return "tsvector";
-  },
 });
 
 export const platformRoleEnum = pgEnum("platform_role", [
@@ -583,7 +576,6 @@ export const childChunks = pgTable(
     tokenCount: integer("token_count"),
     metadata: jsonb("metadata").default({}).notNull(),
     embedding: vector("embedding", { dimensions: 1024 }),
-    searchVector: tsvector("search_vector"),
     embeddingStatus: embeddingStatusEnum("embedding_status").default("pending").notNull(),
     enabled: boolean("enabled").default(true).notNull(),
     ...timestamps(),
@@ -593,7 +585,6 @@ export const childChunks = pgTable(
     index("child_chunks_document_idx").on(table.documentId),
     index("child_chunks_knowledge_base_idx").on(table.knowledgeBaseId),
     index("child_chunks_embedding_hnsw_idx").using("hnsw", table.embedding.op("vector_cosine_ops")),
-    index("child_chunks_search_vector_gin_idx").using("gin", table.searchVector),
   ],
 );
 
@@ -613,7 +604,6 @@ export const knowledgeItems = pgTable(
     status: knowledgeItemStatusEnum("status").default("draft").notNull(),
     metadata: jsonb("metadata").default({}).notNull(),
     embedding: vector("embedding", { dimensions: 1024 }),
-    searchVector: tsvector("search_vector"),
     createdBy: uuid("created_by")
       .notNull()
       .references(() => users.id),
@@ -635,7 +625,6 @@ export const knowledgeItems = pgTable(
       "hnsw",
       table.embedding.op("vector_cosine_ops"),
     ),
-    index("knowledge_items_search_vector_gin_idx").using("gin", table.searchVector),
   ],
 );
 

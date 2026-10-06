@@ -399,12 +399,12 @@ export class RetrievalService {
     allowedKnowledgeBaseIds: string[],
   ): Promise<DocumentRecallRow[]> {
     const query = queries.join(" ");
+    // PGroonga 原始分数是关键词命中次数（TF），用 s/(1+s) 压缩到 (0,1)，
+    // 便于与向量余弦相似度（0~1）跨通道比较；单调变换不影响排序。
+    const rawScoreSql = sql<number>`pgroonga_score(${childChunks}.tableoid, ${childChunks}.ctid)`;
+    const scoreSql = sql<number>`(${rawScoreSql}) / (1 + (${rawScoreSql}))`;
     return db
-      .select(
-        this.documentRecallSelection(
-          sql<number>`ts_rank_cd(${childChunks.searchVector}, plainto_tsquery('simple', ${query}))`,
-        ),
-      )
+      .select(this.documentRecallSelection(scoreSql))
       .from(childChunks)
       .innerJoin(parentChunks, eq(parentChunks.id, childChunks.parentChunkId))
       .innerJoin(documents, eq(documents.id, childChunks.documentId))
@@ -418,12 +418,11 @@ export class RetrievalService {
           eq(documents.processStatus, "completed"),
           eq(parentChunks.enabled, true),
           eq(childChunks.enabled, true),
-          sql`${childChunks.searchVector} @@ plainto_tsquery('simple', ${query})`,
+          // pgroonga_query_escape 防止用户输入被当作 PGroonga 查询语法解析
+          sql`${childChunks.content} &@~ pgroonga_query_escape(${query})`,
         ),
       )
-      .orderBy(
-        desc(sql`ts_rank_cd(${childChunks.searchVector}, plainto_tsquery('simple', ${query}))`),
-      )
+      .orderBy(desc(scoreSql))
       .limit(FTS_TOP_K);
   }
 
@@ -505,7 +504,8 @@ export class RetrievalService {
     documentStatus: "all" | "completed",
     candidateLimit: number,
   ): Promise<DocumentRecallRow[]> {
-    const scoreSql = sql<number>`ts_rank_cd(${childChunks.searchVector}, plainto_tsquery('simple', ${query}))`;
+    const rawScoreSql = sql<number>`pgroonga_score(${childChunks}.tableoid, ${childChunks}.ctid)`;
+    const scoreSql = sql<number>`(${rawScoreSql}) / (1 + (${rawScoreSql}))`;
     return db
       .select(this.documentRecallSelection(scoreSql))
       .from(childChunks)
@@ -521,7 +521,7 @@ export class RetrievalService {
           this.documentStatusCondition(documentStatus),
           eq(parentChunks.enabled, true),
           eq(childChunks.enabled, true),
-          sql`${childChunks.searchVector} @@ plainto_tsquery('simple', ${query})`,
+          sql`${childChunks.content} &@~ pgroonga_query_escape(${query})`,
         ),
       )
       .orderBy(desc(scoreSql))
