@@ -12,6 +12,7 @@ import type { AuthenticatedUser } from "../auth/auth.types.js";
 import type { RetrievalResult } from "../retrieval/retrieval.types.js";
 import type { AccessibleKnowledgeBase } from "./agent-scope.js";
 import type { RecentConversationMessage } from "./agent-memory.js";
+import type { QueryPlan } from "./query-understanding.service.js";
 
 export type SseEmitter = (event: AskStreamEvent) => Promise<void>;
 
@@ -29,6 +30,7 @@ export type AgentState = {
   accessibleKnowledgeBases: AccessibleKnowledgeBase[];
   recentMessages: RecentConversationMessage[];
   conversationSummary: string | null;
+  queryPlan: QueryPlan | null;
   rewrittenQueries: string[];
   retrieval: RetrievalResult | null;
   promptSnapshot: string | null;

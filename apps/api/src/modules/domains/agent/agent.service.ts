@@ -15,6 +15,7 @@ import {
   conversationMessages,
   conversations,
   db,
+  documents,
   knowledgeBases,
   knowledgeItems,
   messageCitations,
@@ -77,8 +78,9 @@ import {
   createConversationSummaryQueue,
 } from "./conversation-summary-queue.js";
 import type { AgentState, RuntimeAgent, SseEmitter } from "./agent.types.js";
+import { QueryUnderstandingService } from "./query-understanding.service.js";
 
-const GRAPH_VERSION = "p0-retrieval-chat-13-node-v1";
+const GRAPH_VERSION = "query-router-chat-v2";
 const MIN_CONTEXT_RERANK_SCORE = 0.05;
 const DEFAULT_CONVERSATION_TITLE = "新对话";
 const FALLBACK_ANSWER =
@@ -110,6 +112,10 @@ export class AgentService {
     private readonly analytics: AnalyticsEventService,
     @Inject(KnowledgeImprovementService)
     private readonly improvementService: KnowledgeImprovementService,
+    @Inject(QueryUnderstandingService)
+    private readonly queryUnderstanding: QueryUnderstandingService = new QueryUnderstandingService(
+      llm,
+    ),
   ) {}
 
   async listAgents(
@@ -224,6 +230,7 @@ export class AgentService {
     user: AuthenticatedUser;
     emit: SseEmitter;
   }): Promise<ConversationMessage> {
+    //链路前校验流程
     const conversation = await this.findConversationForUser(input.conversationId, input.user);
     const agent = await this.findAgentRow(conversation.agentId);
     await this.ensureCanUseAgent(agent, input.user);
@@ -240,7 +247,7 @@ export class AgentService {
     if (userMessage === undefined) {
       throw new BadRequestException("创建用户消息失败");
     }
-
+    //埋点上报
     await this.analytics.recordSafe({
       user: input.user,
       eventType: "agent_called",
@@ -253,13 +260,13 @@ export class AgentService {
         messageId: userMessage.id,
       },
     });
-
+    //SSE
     await input.emit({
       type: "agent.started",
       conversationId: conversation.id,
       userMessageId: userMessage.id,
     });
-
+    //构建初始状态
     const initialState: AgentState = {
       user: input.user,
       conversation: this.toConversation(conversation),
@@ -270,6 +277,7 @@ export class AgentService {
       accessibleKnowledgeBases: [],
       recentMessages: [],
       conversationSummary: null,
+      queryPlan: null,
       rewrittenQueries: [],
       retrieval: null,
       promptSnapshot: null,
@@ -285,6 +293,7 @@ export class AgentService {
     };
 
     const graph = this.buildGraph();
+    //进图(进入编排层)
     const result = await graph.invoke({ state: initialState });
     if (result.state.assistantMessage === null) {
       throw new InternalServerErrorException("Agent 未生成助手消息");
@@ -364,77 +373,87 @@ export class AgentService {
       );
     }
   }
-
+  //建图
   private buildGraph() {
-    return new StateGraph(AgentStateAnnotation)
-      .addNode("load_agent", (input) =>
-        this.runStep(input.state, "load_agent", (state) => this.loadAgent(state)),
-      )
-      .addNode("check_agent_permission", (input) =>
-        this.runStep(input.state, "check_agent_permission", (state) =>
-          this.checkAgentPermission(state),
-        ),
-      )
-      .addNode("resolve_knowledge_scope", (input) =>
-        this.runStep(input.state, "resolve_knowledge_scope", (state) =>
-          this.resolveKnowledgeScope(state),
-        ),
-      )
-      .addNode("analyze_query", (input) =>
-        this.runStep(input.state, "analyze_query", (state) =>
-          Promise.resolve(this.analyzeQuery(state)),
-        ),
-      )
-      .addNode("parse_conversation_attachments", (input) =>
-        this.runStep(input.state, "parse_conversation_attachments", (state) =>
-          this.parseConversationAttachments(state),
-        ),
-      )
-      .addNode("retrieve_knowledge", (input) =>
-        this.runStep(input.state, "retrieve_knowledge", (state) => this.retrieveKnowledge(state)),
-      )
-      .addNode("rerank_context", (input) =>
-        this.runStep(input.state, "rerank_context", (state) =>
-          Promise.resolve(this.rerankContext(state)),
-        ),
-      )
-      .addNode("build_prompt", (input) =>
-        this.runStep(input.state, "build_prompt", (state) =>
-          Promise.resolve(this.buildPrompt(state)),
-        ),
-      )
-      .addNode("generate_answer_stream", (input) =>
-        this.runStep(input.state, "generate_answer_stream", (state) =>
-          this.generateAnswerStream(state),
-        ),
-      )
-      .addNode("attach_citations", (input) =>
-        this.runStep(input.state, "attach_citations", (state) => this.attachCitations(state)),
-      )
-      .addNode("calculate_confidence", (input) =>
-        this.runStep(input.state, "calculate_confidence", (state) =>
-          Promise.resolve(this.calculateConfidence(state)),
-        ),
-      )
-      .addNode("record_trace", (input) =>
-        this.runStep(input.state, "record_trace", (state) => this.recordTrace(state)),
-      )
-      .addEdge(START, "load_agent")
-      .addEdge("load_agent", "check_agent_permission")
-      .addEdge("check_agent_permission", "resolve_knowledge_scope")
-      .addEdge("resolve_knowledge_scope", "analyze_query")
-      .addEdge("analyze_query", "parse_conversation_attachments")
-      .addEdge("parse_conversation_attachments", "retrieve_knowledge")
-      .addEdge("retrieve_knowledge", "rerank_context")
-      .addEdge("rerank_context", "build_prompt")
-      .addEdge("build_prompt", "generate_answer_stream")
-      .addEdge("generate_answer_stream", "attach_citations")
-      .addEdge("attach_citations", "calculate_confidence")
-      .addEdge("calculate_confidence", "record_trace")
-      .addEdge("record_trace", END)
-      .compile();
+    return (
+      new StateGraph(AgentStateAnnotation)
+        .addNode("load_agent", (input) =>
+          this.runStep(input.state, "load_agent", (state) => this.loadAgent(state)),
+        )
+        .addNode("check_agent_permission", (input) =>
+          this.runStep(input.state, "check_agent_permission", (state) =>
+            this.checkAgentPermission(state),
+          ),
+        )
+        .addNode("resolve_knowledge_scope", (input) =>
+          this.runStep(input.state, "resolve_knowledge_scope", (state) =>
+            this.resolveKnowledgeScope(state),
+          ),
+        )
+        .addNode("analyze_query", (input) =>
+          this.runStep(input.state, "analyze_query", (state) => this.analyzeQuery(state)),
+        )
+        .addNode("parse_conversation_attachments", (input) =>
+          this.runStep(input.state, "parse_conversation_attachments", (state) =>
+            this.parseConversationAttachments(state),
+          ),
+        )
+        .addNode("retrieve_knowledge", (input) =>
+          this.runStep(input.state, "retrieve_knowledge", (state) => this.retrieveKnowledge(state)),
+        )
+        .addNode("rerank_context", (input) =>
+          this.runStep(input.state, "rerank_context", (state) =>
+            Promise.resolve(this.rerankContext(state)),
+          ),
+        )
+        .addNode("build_prompt", (input) =>
+          this.runStep(input.state, "build_prompt", (state) =>
+            Promise.resolve(this.buildPrompt(state)),
+          ),
+        )
+        .addNode("generate_answer_stream", (input) =>
+          this.runStep(input.state, "generate_answer_stream", (state) =>
+            this.generateAnswerStream(state),
+          ),
+        )
+        .addNode("attach_citations", (input) =>
+          this.runStep(input.state, "attach_citations", (state) => this.attachCitations(state)),
+        )
+        .addNode("calculate_confidence", (input) =>
+          this.runStep(input.state, "calculate_confidence", (state) =>
+            Promise.resolve(this.calculateConfidence(state)),
+          ),
+        )
+        .addNode("record_trace", (input) =>
+          this.runStep(input.state, "record_trace", (state) => this.recordTrace(state)),
+        )
+        .addEdge(START, "load_agent")
+        .addEdge("load_agent", "check_agent_permission")
+        .addEdge("check_agent_permission", "resolve_knowledge_scope")
+        // 先加载历史再理解追问；非知识查询直接进入回复路径，跳过召回和重排。
+        .addEdge("resolve_knowledge_scope", "parse_conversation_attachments")
+        .addEdge("parse_conversation_attachments", "analyze_query")
+        .addConditionalEdges("analyze_query", (input) =>
+          input.state.queryPlan === null
+            ? isKnowledgeScopeQuestion(input.state.query)
+              ? "build_prompt"
+              : "retrieve_knowledge"
+            : input.state.queryPlan.needsRetrieval
+              ? "retrieve_knowledge"
+              : "build_prompt",
+        )
+        .addEdge("retrieve_knowledge", "rerank_context")
+        .addEdge("rerank_context", "build_prompt")
+        .addEdge("build_prompt", "generate_answer_stream")
+        .addEdge("generate_answer_stream", "attach_citations")
+        .addEdge("attach_citations", "calculate_confidence")
+        .addEdge("calculate_confidence", "record_trace")
+        .addEdge("record_trace", END)
+        .compile()
+    );
   }
 
+  //节点包装器 包装后来执行节点 推送进度 错误兜底
   private async runStep(
     state: AgentState,
     step: string,
@@ -445,6 +464,7 @@ export class AgentService {
     try {
       const next = await handler.call(this, {
         ...state,
+        //当前步骤追加
         steps: [...state.steps, started],
       });
       await next.emit({ type: "agent.step.completed", step });
@@ -476,6 +496,7 @@ export class AgentService {
   private async resolveKnowledgeScope(state: AgentState): Promise<AgentState> {
     const agent = this.requireAgent(state);
     if (agent.type === "global") {
+      //全局agent,查验用户可访问的所有知识库的权限
       const accessCondition = this.accessService.buildAccessCondition(state.user);
       const rows = await db
         .select({
@@ -511,16 +532,31 @@ export class AgentService {
     };
   }
 
-  private analyzeQuery(state: AgentState): AgentState {
-    const query = state.query.trim();
-    const keywords = query
-      .split(/[\s,.;，。；、!?！？]+/)
-      .map((item) => item.trim())
-      .filter((item) => item.length >= 2)
-      .slice(0, 6);
+  // 基于已加载的历史和授权库信息，仅识别当前消息是否需要知识库检索。
+  private async analyzeQuery(state: AgentState): Promise<AgentState> {
+    // 回滚开关仅恢复旧查询分析，不改变身份校验或知识库授权边界。
+    if (process.env["QUERY_ROUTING_MODE"] === "legacy") {
+      // 查询重写暂时停用，旧模式也只保留原始问题。
+      return {
+        ...state,
+        queryPlan: null,
+        rewrittenQueries: [],
+      };
+    }
+    const queryPlan = await this.queryUnderstanding.understand(
+      {
+        query: state.query,
+        recentMessages: state.recentMessages,
+        conversationSummary: state.conversationSummary,
+        accessibleKnowledgeBases: state.accessibleKnowledgeBases,
+      },
+      { mode: process.env["QUERY_ROUTING_MODE"] === "llm_only" ? "llm_only" : "rules" },
+    );
     return {
       ...state,
-      rewrittenQueries: keywords.length > 0 ? [query, keywords.join(" ")] : [query],
+      queryPlan,
+      // 查询重写由后续独立节点接入；当前检索只使用原始用户问题。
+      rewrittenQueries: [],
     };
   }
 
@@ -557,7 +593,12 @@ export class AgentService {
   }
 
   private async retrieveKnowledge(state: AgentState): Promise<AgentState> {
-    if (isKnowledgeScopeQuestion(state.query)) {
+    //元问题拦截
+    if (
+      state.queryPlan !== null
+        ? !state.queryPlan.needsRetrieval
+        : isKnowledgeScopeQuestion(state.query)
+    ) {
       await state.emit({
         type: "agent.retrieval.completed",
         contextCount: 0,
@@ -566,9 +607,14 @@ export class AgentService {
     }
 
     const retrieval = await this.retrievalService.retrieve({
+      // 查询重写暂时停用，检索阶段直接使用原始用户问题。
       query: state.query,
       rewrittenQueries: state.rewrittenQueries,
-      allowedKnowledgeBaseIds: state.knowledgeScope,
+      allowedKnowledgeBaseIds: state.queryPlan?.requestedKnowledgeBaseIds.length
+        ? state.knowledgeScope.filter((id) =>
+            state.queryPlan?.requestedKnowledgeBaseIds.includes(id),
+          )
+        : state.knowledgeScope,
     });
     await state.emit({
       type: "agent.retrieval.completed",
@@ -600,7 +646,10 @@ export class AgentService {
   }
 
   private async generateAnswerStream(state: AgentState): Promise<AgentState> {
-    if (isKnowledgeScopeQuestion(state.query)) {
+    if (state.queryPlan !== null && !state.queryPlan.needsRetrieval) {
+      return this.generateRoutedAnswer(state);
+    }
+    if (state.queryPlan === null && isKnowledgeScopeQuestion(state.query)) {
       const answer = buildKnowledgeScopeAnswer(state.accessibleKnowledgeBases);
       await state.emit({ type: "agent.answer.delta", delta: answer });
       return {
@@ -667,6 +716,76 @@ export class AgentService {
     return { ...state, answer };
   }
 
+  // 根据已校验的路由生成直接回复；这些路径不访问向量检索。
+  private async generateRoutedAnswer(state: AgentState): Promise<AgentState> {
+    const plan = state.queryPlan;
+    if (plan === null) throw new InternalServerErrorException("查询计划未构建");
+    let answer: string;
+    switch (plan.route) {
+      case "social":
+        answer = "你好，我可以帮助你查询知识库中的制度、流程和业务资料。有需要时可以直接提问。";
+        break;
+      case "capability":
+        answer =
+          "我可以查询你有权限访问的知识库，回答资料中的问题，展示可用知识库或资料目录，并整理上一条回答。你可以问：报销需要哪些材料？";
+        break;
+      case "redirect":
+        answer =
+          "我主要帮助你查询知识库资料。你可以询问库内的制度、流程或业务知识，例如休假规定、报销材料或研发规范。";
+        break;
+      case "scope":
+        answer = buildKnowledgeScopeAnswer(state.accessibleKnowledgeBases);
+        break;
+      case "catalog":
+        answer = await this.buildDocumentCatalogAnswer(state);
+        break;
+      // LLM 只做检索判断；不检索时统一返回固定引导文案，越权或降级时使用其专用提示。
+      case "direct":
+        answer =
+          plan.answer ??
+          "我主要帮助你查询知识库中的制度、流程和业务资料。请提出具体业务问题，例如休假规定或报销材料。";
+        break;
+      case "retrieve":
+        throw new InternalServerErrorException("知识查询不能进入直接回复路径");
+      default:
+        throw new InternalServerErrorException("不支持的查询路由");
+    }
+    await state.emit({ type: "agent.answer.delta", delta: answer });
+    return { ...state, answer, citations: [], confidenceLevel: null, noAnswerType: null };
+  }
+
+  // 只读取当前授权库的有效文档标题，限制列表长度且明确是否截断。
+  private async buildDocumentCatalogAnswer(state: AgentState): Promise<string> {
+    const requested = state.queryPlan?.requestedKnowledgeBaseIds ?? [];
+    const scope = state.knowledgeScope.filter(
+      (id) => requested.length === 0 || requested.includes(id),
+    );
+    if (scope.length === 0) return "你当前没有可查询的资料范围，请从可访问知识库中选择。";
+    const rows = await db
+      .select({ title: documents.title, knowledgeBaseName: knowledgeBases.name })
+      .from(documents)
+      .innerJoin(knowledgeBases, eq(knowledgeBases.id, documents.knowledgeBaseId))
+      .where(
+        and(
+          inArray(documents.knowledgeBaseId, scope),
+          isNull(knowledgeBases.deletedAt),
+          eq(knowledgeBases.status, "active"),
+          eq(documents.enabled, true),
+          eq(documents.processStatus, "completed"),
+        ),
+      )
+      .orderBy(asc(knowledgeBases.name), asc(documents.title))
+      .limit(51);
+    if (rows.length === 0) return "当前查询范围内没有已启用且处理完成的文档。";
+    const titles = rows
+      .slice(0, 50)
+      .map(
+        (row, index) =>
+          `${String(index + 1)}. ${row.title.replace(/[\r\n]/gu, " ")}（${row.knowledgeBaseName.replace(/[\r\n]/gu, " ")}）`,
+      );
+    return `当前范围内可查询的文档：\n${titles.join("\n")}${rows.length > 50 ? "\n仅展示前 50 条，请缩小知识库范围查看。" : ""}`;
+  }
+
   private async attachCitations(state: AgentState): Promise<AgentState> {
     if (state.noAnswerType !== null) {
       await state.emit({ type: "agent.citations.ready", citations: [] });
@@ -679,6 +798,10 @@ export class AgentService {
   }
 
   private calculateConfidence(state: AgentState): AgentState {
+    // 问候、引导、目录和历史整理没有检索证据，不伪造知识可信度或知识缺口。
+    if (state.queryPlan !== null && !state.queryPlan.needsRetrieval) {
+      return { ...state, confidenceLevel: null, noAnswerType: null };
+    }
     if (state.noAnswerType !== null) {
       return { ...state, confidenceLevel: state.confidenceLevel ?? "not_found" };
     }
@@ -853,7 +976,12 @@ export class AgentService {
   }
 
   private async recordAskAnalytics(state: AgentState, durationMs: number): Promise<void> {
-    if (isKnowledgeScopeQuestion(state.query)) {
+    // 非知识查询不写入各知识库问答和缺口统计，避免问候污染反馈闭环。
+    if (
+      state.queryPlan !== null
+        ? !state.queryPlan.needsRetrieval
+        : isKnowledgeScopeQuestion(state.query)
+    ) {
       return;
     }
 
@@ -1218,6 +1346,7 @@ export class AgentService {
         name: item.name,
       })),
       rewrittenQueries: state.rewrittenQueries,
+      queryPlan: state.queryPlan,
       retrievalTrace: state.retrieval?.trace ?? null,
       confidenceLevel: state.confidenceLevel,
       noAnswerType: state.noAnswerType,

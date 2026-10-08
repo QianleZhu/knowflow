@@ -107,6 +107,7 @@ export class RetrievalService {
     rewrittenQueries?: string[];
     allowedKnowledgeBaseIds: string[];
   }): Promise<RetrievalResult> {
+    //查询
     const queries = [input.query, ...(input.rewrittenQueries ?? [])]
       .map((query) => query.trim())
       .filter((query, index, list) => query.length > 0 && list.indexOf(query) === index);
@@ -119,6 +120,7 @@ export class RetrievalService {
     }
 
     const queryEmbedding = await this.llm.embedTexts([queries[0] ?? input.query]);
+    //三路并行召回
     const [vectorRows, ftsRows, knowledgeRows] = await Promise.all([
       this.recallVector(
         queries[0] ?? input.query,
@@ -132,6 +134,7 @@ export class RetrievalService {
         input.allowedKnowledgeBaseIds,
       ),
     ]);
+    //合并去重
     const merged = this.mergeCandidates([
       ...this.toDocumentCandidates(vectorRows, "vector"),
       ...this.toDocumentCandidates(ftsRows, "fts"),

@@ -2,13 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { NotFoundException } from "@nestjs/common";
-import {
-  agentKnowledgeBases,
-  agents,
-  conversations,
-  db,
-  knowledgeBases,
-} from "@knowflow/db";
+import { agentKnowledgeBases, agents, conversations, db, knowledgeBases } from "@knowflow/db";
 import type { ConversationListQuery } from "@knowflow/shared";
 import { and, eq, type SQL } from "drizzle-orm";
 
@@ -16,13 +10,11 @@ import type { AuthenticatedUser } from "../auth/auth.types.js";
 import type { KnowledgeImprovementService } from "../knowledge-base/knowledge-improvement.service.js";
 import { AgentService } from "./agent.service.js";
 import type { AgentState } from "./agent.types.js";
+import type { QueryPlan } from "./query-understanding.service.js";
 
 type AgentServiceInternals = {
   buildAgentAccessCondition: (user: AuthenticatedUser) => SQL | undefined;
-  buildAgentBoundToKnowledgeBaseExists: (
-    knowledgeBaseId: string,
-    user: AuthenticatedUser,
-  ) => SQL;
+  buildAgentBoundToKnowledgeBaseExists: (knowledgeBaseId: string, user: AuthenticatedUser) => SQL;
   buildAgentKnowledgeBaseScopeCondition: (
     agentId: string,
     user: AuthenticatedUser,
@@ -163,8 +155,7 @@ void describe("AgentService conversation archive semantics", () => {
   void it("restores a conversation by flipping status to active", async () => {
     const service = makeService();
     Object.assign(service as object, {
-      findConversationForUser: () =>
-        Promise.resolve(makeConversationRow({ status: "archived" })),
+      findConversationForUser: () => Promise.resolve(makeConversationRow({ status: "archived" })),
     } satisfies Pick<AgentServiceInternals, "findConversationForUser">);
 
     const { updates, restore } = captureConversationUpdates([makeConversationRow()]);
@@ -185,7 +176,10 @@ void describe("AgentService conversation archive semantics", () => {
     const service = makeService();
     const { restore } = captureConversationSelect([]);
     try {
-      await assert.rejects(() => service.archiveConversation(conversationId, user), NotFoundException);
+      await assert.rejects(
+        () => service.archiveConversation(conversationId, user),
+        NotFoundException,
+      );
     } finally {
       restore();
     }
@@ -195,7 +189,10 @@ void describe("AgentService conversation archive semantics", () => {
     const service = makeService();
     const { restore } = captureConversationSelect([]);
     try {
-      await assert.rejects(() => service.restoreConversation(conversationId, user), NotFoundException);
+      await assert.rejects(
+        () => service.restoreConversation(conversationId, user),
+        NotFoundException,
+      );
     } finally {
       restore();
     }
@@ -523,6 +520,21 @@ function makeConversationRow(overrides: Partial<ConversationRow> = {}): Conversa
 }
 
 void describe("AgentService conversation memory answer generation", () => {
+  void it("returns the decision model answer without invoking the answer model", async () => {
+    const llm = makeLlmStub("must not generate again");
+    const service = serviceWithGeneration(llm);
+    const state = {
+      ...makeGenerationState({ retrievalContexts: [] }),
+      queryPlan: { ...makeQueryPlan("direct"), answer: "1. 核对材料。\n2. 提交申请。" },
+    };
+    const result = await service.generateAnswerStream(state);
+    assert.equal(result.answer, state.queryPlan.answer);
+    assert.equal(llm.streamedMessages.length, 0);
+    assert.deepEqual(result.citations, []);
+    assert.equal(result.confidenceLevel, null);
+    assert.equal(result.noAnswerType, null);
+  });
+
   void it("uses short-term memory even when retrieval returns no contexts", async () => {
     const llm = makeLlmStub("memory answer");
     const service = serviceWithGeneration(llm);
@@ -535,12 +547,10 @@ void describe("AgentService conversation memory answer generation", () => {
 
     assert.equal(result.answer, "memory answer");
     assert.equal(result.noAnswerType, null);
-    assert.deepEqual(llm.streamedMessages.map((message) => message.role), [
-      "system",
-      "system",
-      "user",
-      "user",
-    ]);
+    assert.deepEqual(
+      llm.streamedMessages.map((message) => message.role),
+      ["system", "system", "user", "user"],
+    );
     assert.equal(
       llm.streamedMessages.some((message) => message.content.includes("previous topic")),
       true,
@@ -577,6 +587,109 @@ void describe("AgentService conversation memory answer generation", () => {
   });
 });
 
+// 运行真实 LangGraph 编排验证历史先加载与非检索分支，不把依赖替身当成端到端验收。
+void describe("AgentService query routing integration", () => {
+  void it("loads memory before analysis and skips retrieval/rerank for direct replies", async () => {
+    const service = makeService();
+    const order: string[] = [];
+    const plan = makeQueryPlan("social");
+    Object.assign(service, {
+      loadAgent: (state: AgentState) => Promise.resolve(state),
+      checkAgentPermission: (state: AgentState) => Promise.resolve(state),
+      resolveKnowledgeScope: (state: AgentState) => Promise.resolve(state),
+      parseConversationAttachments: (state: AgentState) => {
+        order.push("memory");
+        return Promise.resolve({
+          ...state,
+          recentMessages: [{ role: "user" as const, content: "出差报销" }],
+        });
+      },
+      analyzeQuery: (state: AgentState) => {
+        order.push("analysis");
+        assert.equal(state.recentMessages[0]?.content, "出差报销");
+        return Promise.resolve({ ...state, queryPlan: plan });
+      },
+      retrieveKnowledge: () => Promise.reject(new Error("direct reply must not retrieve")),
+      rerankContext: () => {
+        throw new Error("direct reply must not rerank");
+      },
+      recordTrace: (state: AgentState) => Promise.resolve(state),
+    });
+    const graph = (
+      service as unknown as {
+        buildGraph: () => {
+          invoke: (input: { state: AgentState }) => Promise<{ state: AgentState }>;
+        };
+      }
+    ).buildGraph();
+    const result = await graph.invoke({ state: { ...makeGenerationState(), retrieval: null } });
+    assert.deepEqual(order, ["memory", "analysis"]);
+    assert.equal(result.state.confidenceLevel, null);
+    assert.equal(result.state.noAnswerType, null);
+    assert.deepEqual(result.state.citations, []);
+    assert.ok(result.state.answer.includes("知识库"));
+  });
+
+  void it("passes standalone query to retrieval and intersects requested scope", async () => {
+    const service = makeService();
+    const calls: { query: string; allowedKnowledgeBaseIds: string[] }[] = [];
+    Object.assign(service, {
+      retrievalService: {
+        retrieve: (request: { query: string; allowedKnowledgeBaseIds: string[] }) => {
+          calls.push(request);
+          return Promise.resolve(makeGenerationState().retrieval);
+        },
+      },
+    });
+    const state: AgentState = {
+      ...makeGenerationState(),
+      knowledgeScope: ["hr", "rd"],
+      queryPlan: { ...makeQueryPlan("retrieve"), requestedKnowledgeBaseIds: ["hr", "secret"] },
+    };
+    await (
+      service as unknown as { retrieveKnowledge: (state: AgentState) => Promise<AgentState> }
+    ).retrieveKnowledge(state);
+    assert.equal(calls[0]?.query, "出差报销需要哪些材料？");
+    assert.deepEqual(calls[0].allowedKnowledgeBaseIds, ["hr"]);
+  });
+
+  void it("does not report social replies as knowledge questions or missing knowledge", async () => {
+    const service = makeService();
+    Object.assign(service, {
+      analytics: {
+        recordSafe: () =>
+          Promise.reject(new Error("social reply must not record knowledge analytics")),
+      },
+    });
+    await (
+      service as unknown as {
+        recordAskAnalytics: (state: AgentState, latency: number) => Promise<void>;
+      }
+    ).recordAskAnalytics({ ...makeGenerationState(), queryPlan: makeQueryPlan("social") }, 1);
+  });
+});
+
+// 构造经过查询理解的计划，便于检查调用链与权限交集。
+function makeQueryPlan(route: QueryPlan["route"]): QueryPlan {
+  return {
+    route,
+    needsRetrieval: route === "retrieve",
+    answer: route === "direct" ? "已总结的内容" : null,
+    standaloneQuery: "出差报销需要哪些材料？",
+    keywords: ["报销", "材料"],
+    requestedKnowledgeBaseIds: [],
+    trace: {
+      version: "test",
+      mode: "rules",
+      source: "llm",
+      ruleId: null,
+      reason: "test",
+      llmCalls: 1,
+      latencyMs: 0,
+    },
+  };
+}
+
 void describe("AgentService conversation summary enqueue", () => {
   void it("swallows enqueue failures and logs a warning", async () => {
     const mutableDb = db as unknown as MutableDb;
@@ -593,9 +706,7 @@ void describe("AgentService conversation summary enqueue", () => {
     };
 
     try {
-      await service.enqueueConversationSummaryIfNeeded(
-        "00000000-0000-0000-0000-000000000010",
-      );
+      await service.enqueueConversationSummaryIfNeeded("00000000-0000-0000-0000-000000000010");
 
       assert.equal(warnings.length, 1);
       assert.match(warnings[0] ?? "", /Failed to enqueue conversation summary/);
@@ -769,6 +880,7 @@ function makeGenerationState(
     accessibleKnowledgeBases: [],
     recentMessages: options.recentMessages ?? [],
     conversationSummary: options.conversationSummary ?? null,
+    queryPlan: null,
     rewrittenQueries: ["What did I ask before?"],
     retrieval: {
       query: "What did I ask before?",

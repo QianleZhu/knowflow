@@ -7,10 +7,11 @@ import { AgentManagementController } from "./agent-management.controller.js";
 import { AgentManagementService } from "./agent-management.service.js";
 import { AgentController } from "./agent.controller.js";
 import { AgentService } from "./agent.service.js";
+import { QueryUnderstandingService } from "./query-understanding.service.js";
 
 @Module({
   imports: [KnowledgeBaseModule, RetrievalModule],
   controllers: [AgentController, AgentManagementController],
-  providers: [AliyunLlmService, AgentService, AgentManagementService],
+  providers: [AliyunLlmService, QueryUnderstandingService, AgentService, AgentManagementService],
 })
 export class AgentModule {}
