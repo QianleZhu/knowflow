@@ -8,10 +8,17 @@ import { AgentManagementService } from "./agent-management.service.js";
 import { AgentController } from "./agent.controller.js";
 import { AgentService } from "./agent.service.js";
 import { QueryUnderstandingService } from "./query-understanding.service.js";
+import { QueryRewriteService } from "./query-rewrite.service.js";
 
 @Module({
   imports: [KnowledgeBaseModule, RetrievalModule],
   controllers: [AgentController, AgentManagementController],
-  providers: [AliyunLlmService, QueryUnderstandingService, AgentService, AgentManagementService],
+  providers: [
+    AliyunLlmService,
+    QueryUnderstandingService,
+    QueryRewriteService,
+    AgentService,
+    AgentManagementService,
+  ],
 })
 export class AgentModule {}

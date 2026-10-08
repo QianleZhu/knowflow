@@ -32,6 +32,7 @@ export type AgentState = {
   conversationSummary: string | null;
   queryPlan: QueryPlan | null;
   rewrittenQueries: string[];
+  expandedKeywords: string[];
   retrieval: RetrievalResult | null;
   promptSnapshot: string | null;
   answer: string;

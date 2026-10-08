@@ -879,12 +879,14 @@ function makeGenerationState(
     knowledgeScope: [],
     accessibleKnowledgeBases: [],
     recentMessages: options.recentMessages ?? [],
-    conversationSummary: options.conversationSummary ?? null,
-    queryPlan: null,
-    rewrittenQueries: ["What did I ask before?"],
-    retrieval: {
-      query: "What did I ask before?",
+      conversationSummary: options.conversationSummary ?? null,
+      queryPlan: null,
       rewrittenQueries: ["What did I ask before?"],
+      expandedKeywords: ["previous", "question"],
+      retrieval: {
+        query: "What did I ask before?",
+        rewrittenQueries: ["What did I ask before?"],
+        expandedKeywords: ["previous", "question"],
       candidates: [],
       contexts: retrievalContexts,
       trace: {

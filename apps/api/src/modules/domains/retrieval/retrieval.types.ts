@@ -44,6 +44,7 @@ export type RetrievalTrace = {
 export type RetrievalResult = {
   query: string;
   rewrittenQueries: string[];
+  expandedKeywords: string[];
   candidates: RetrievalCandidate[];
   contexts: RetrievalContextItem[];
   trace: RetrievalTrace;

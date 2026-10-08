@@ -78,6 +78,7 @@ import {
   createConversationSummaryQueue,
 } from "./conversation-summary-queue.js";
 import type { AgentState, RuntimeAgent, SseEmitter } from "./agent.types.js";
+import { QueryRewriteService } from "./query-rewrite.service.js";
 import { QueryUnderstandingService } from "./query-understanding.service.js";
 
 const GRAPH_VERSION = "query-router-chat-v2";
@@ -116,6 +117,8 @@ export class AgentService {
     private readonly queryUnderstanding: QueryUnderstandingService = new QueryUnderstandingService(
       llm,
     ),
+    @Inject(QueryRewriteService)
+    private readonly queryRewrite: QueryRewriteService = new QueryRewriteService(llm),
   ) {}
 
   async listAgents(
@@ -279,6 +282,7 @@ export class AgentService {
       conversationSummary: null,
       queryPlan: null,
       rewrittenQueries: [],
+      expandedKeywords: [],
       retrieval: null,
       promptSnapshot: null,
       answer: "",
@@ -393,6 +397,9 @@ export class AgentService {
         .addNode("analyze_query", (input) =>
           this.runStep(input.state, "analyze_query", (state) => this.analyzeQuery(state)),
         )
+        .addNode("rewrite_query", (input) =>
+          this.runStep(input.state, "rewrite_query", (state) => this.rewriteQuery(state)),
+        )
         .addNode("parse_conversation_attachments", (input) =>
           this.runStep(input.state, "parse_conversation_attachments", (state) =>
             this.parseConversationAttachments(state),
@@ -437,11 +444,12 @@ export class AgentService {
           input.state.queryPlan === null
             ? isKnowledgeScopeQuestion(input.state.query)
               ? "build_prompt"
-              : "retrieve_knowledge"
+              : "rewrite_query"
             : input.state.queryPlan.needsRetrieval
-              ? "retrieve_knowledge"
+              ? "rewrite_query"
               : "build_prompt",
         )
+        .addEdge("rewrite_query", "retrieve_knowledge")
         .addEdge("retrieve_knowledge", "rerank_context")
         .addEdge("rerank_context", "build_prompt")
         .addEdge("build_prompt", "generate_answer_stream")
@@ -541,6 +549,7 @@ export class AgentService {
         ...state,
         queryPlan: null,
         rewrittenQueries: [],
+        expandedKeywords: [],
       };
     }
     const queryPlan = await this.queryUnderstanding.understand(
@@ -555,8 +564,27 @@ export class AgentService {
     return {
       ...state,
       queryPlan,
-      // 查询重写由后续独立节点接入；当前检索只使用原始用户问题。
       rewrittenQueries: [],
+      expandedKeywords: [],
+    };
+  }
+
+  // 在同一个查询重写节点中生成向量检索改写和全文检索关键词；任一任务失败都不阻断原文检索。
+  private async rewriteQuery(state: AgentState): Promise<AgentState> {
+    const { rewrittenQuery, expandedKeywords } = await this.queryRewrite.rewriteAndExpand({
+      query: state.query,
+      recentMessages: state.recentMessages,
+      conversationSummary: state.conversationSummary,
+    });
+    const originalQuery = state.query.trim();
+    const normalizedRewrite = rewrittenQuery?.trim() ?? "";
+    return {
+      ...state,
+      rewrittenQueries:
+        normalizedRewrite.length > 0 && normalizedRewrite !== originalQuery
+          ? [normalizedRewrite]
+          : [],
+      expandedKeywords,
     };
   }
 
@@ -607,9 +635,9 @@ export class AgentService {
     }
 
     const retrieval = await this.retrievalService.retrieve({
-      // 查询重写暂时停用，检索阶段直接使用原始用户问题。
       query: state.query,
       rewrittenQueries: state.rewrittenQueries,
+      expandedKeywords: state.expandedKeywords,
       allowedKnowledgeBaseIds: state.queryPlan?.requestedKnowledgeBaseIds.length
         ? state.knowledgeScope.filter((id) =>
             state.queryPlan?.requestedKnowledgeBaseIds.includes(id),
@@ -1346,6 +1374,7 @@ export class AgentService {
         name: item.name,
       })),
       rewrittenQueries: state.rewrittenQueries,
+      expandedKeywords: state.expandedKeywords,
       queryPlan: state.queryPlan,
       retrievalTrace: state.retrieval?.trace ?? null,
       confidenceLevel: state.confidenceLevel,

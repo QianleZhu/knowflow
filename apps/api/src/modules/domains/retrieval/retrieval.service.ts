@@ -105,34 +105,45 @@ export class RetrievalService {
   async retrieve(input: {
     query: string;
     rewrittenQueries?: string[];
+    expandedKeywords?: string[];
     allowedKnowledgeBaseIds: string[];
   }): Promise<RetrievalResult> {
-    //查询
-    const queries = [input.query, ...(input.rewrittenQueries ?? [])]
-      .map((query) => query.trim())
-      .filter((query, index, list) => query.length > 0 && list.indexOf(query) === index);
-    if (queries.length === 0 || input.allowedKnowledgeBaseIds.length === 0) {
+    // 语义检索使用原文和独立改写，全文检索使用原文和关键词扩展，两个查询集合保持职责隔离。
+    const rewrittenQueries = this.uniqueNonEmpty(input.rewrittenQueries ?? []);
+    const expandedKeywords = this.uniqueNonEmpty(input.expandedKeywords ?? []);
+    const vectorQueries = this.uniqueNonEmpty([input.query, ...rewrittenQueries]);
+    const ftsQueries = this.uniqueNonEmpty([input.query, ...expandedKeywords]);
+    if (vectorQueries.length === 0 || input.allowedKnowledgeBaseIds.length === 0) {
       return this.emptyResult(
         input.query,
-        input.rewrittenQueries ?? [],
+        rewrittenQueries,
+        expandedKeywords,
         input.allowedKnowledgeBaseIds,
       );
     }
 
-    const queryEmbedding = await this.llm.embedTexts([queries[0] ?? input.query]);
-    //三路并行召回
+    // 一次生成所有语义查询的向量，避免改写查询被遗漏或重复请求模型。
+    const queryEmbeddings = await this.llm.embedTexts(vectorQueries);
+    // 原文和改写分别召回后统一合并，文档和知识条目都覆盖两条语义查询。
+    const vectorRowsPromise = Promise.all(
+      vectorQueries.map((query, index) =>
+        this.recallVector(query, queryEmbeddings[index] ?? [], input.allowedKnowledgeBaseIds),
+      ),
+    ).then((rows) => rows.flat());
+    const knowledgeRowsPromise = Promise.all(
+      vectorQueries.map((query, index) =>
+        this.recallKnowledgeItems(
+          query,
+          queryEmbeddings[index] ?? [],
+          input.allowedKnowledgeBaseIds,
+        ),
+      ),
+    ).then((rows) => rows.flat());
+    // 三路并行召回；全文检索只接收原文和关键词扩展结果。
     const [vectorRows, ftsRows, knowledgeRows] = await Promise.all([
-      this.recallVector(
-        queries[0] ?? input.query,
-        queryEmbedding[0] ?? [],
-        input.allowedKnowledgeBaseIds,
-      ),
-      this.recallFts(queries, input.allowedKnowledgeBaseIds),
-      this.recallKnowledgeItems(
-        queries[0] ?? input.query,
-        queryEmbedding[0] ?? [],
-        input.allowedKnowledgeBaseIds,
-      ),
+      vectorRowsPromise,
+      this.recallFts(ftsQueries, input.allowedKnowledgeBaseIds),
+      knowledgeRowsPromise,
     ]);
     //合并去重
     const merged = this.mergeCandidates([
@@ -151,7 +162,8 @@ export class RetrievalService {
 
     return {
       query: input.query,
-      rewrittenQueries: input.rewrittenQueries ?? [],
+      rewrittenQueries,
+      expandedKeywords,
       candidates: reranked,
       contexts,
       trace: {
@@ -1005,11 +1017,13 @@ export class RetrievalService {
   private emptyResult(
     query: string,
     rewrittenQueries: string[],
+    expandedKeywords: string[],
     allowedKnowledgeBaseIds: string[],
   ): RetrievalResult {
     return {
       query,
       rewrittenQueries,
+      expandedKeywords,
       candidates: [],
       contexts: [],
       trace: {
@@ -1024,5 +1038,10 @@ export class RetrievalService {
         final: 0,
       },
     };
+  }
+
+  // 规范化并去重检索查询，避免重复调用向量或全文召回。
+  private uniqueNonEmpty(values: string[]): string[] {
+    return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
   }
 }
