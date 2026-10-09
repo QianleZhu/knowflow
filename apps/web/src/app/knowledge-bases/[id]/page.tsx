@@ -17,7 +17,6 @@ import { TabMembers } from "./_components/tab-members";
 import { TabAnalytics } from "./_components/tab-analytics";
 import { TabAuditLogs } from "./_components/tab-audit-logs";
 import { TabMindMap } from "./_components/tab-mind-map";
-import { TabRetrievalTest } from "./_components/tab-retrieval-test";
 import { TabSettings } from "./_components/tab-settings";
 import { TabImprovement } from "./_components/tab-improvement";
 
@@ -35,7 +34,6 @@ const TAB_DEFS: (TabItem & {
   { value: "members", label: "成员权限", manageOnly: true, restrictedOnly: true },
   { value: "analytics", label: "统计分析" },
   { value: "relations", label: "知识关系" },
-  { value: "retrieval-test", label: "检索测试", manageOnly: true },
   { value: "settings", label: "设置", manageOnly: true },
   { value: "improvement", label: "知识改进", manageOnly: true },
   { value: "audit-log", label: "操作日志", manageOnly: true },
@@ -159,9 +157,6 @@ function KnowledgeBaseDetailContent() {
             canManage={canManage}
             onJumpTab={setActiveTab}
           />
-        ) : null}
-        {activeTab === "retrieval-test" ? (
-          <TabRetrievalTest knowledgeBaseId={knowledgeBaseId} />
         ) : null}
         {activeTab === "settings" ? (
           <TabSettings

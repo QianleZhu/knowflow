@@ -20,22 +20,6 @@ export const DEFAULT_EMBEDDING_MODEL = "text-embedding-v4";
 
 export const DEFAULT_EMBEDDING_DIMENSION = 1024;
 
-export const RETRIEVAL_MODES = [
-  "hybrid",
-  "hybrid_rerank",
-  "vector_only",
-  "fts_only",
-  "ki_only",
-] as const;
-
-export const RETRIEVAL_TEST_MODES = ["default", ...RETRIEVAL_MODES] as const;
-
-export const RETRIEVAL_SOURCE_TYPES = ["all", "chunk", "knowledge_item"] as const;
-
-export const RETRIEVAL_DOCUMENT_STATUS_FILTERS = ["all", "completed"] as const;
-
-export const RETRIEVAL_ITEM_STATUS_FILTERS = ["all", "published"] as const;
-
 export enum AuditTargetType {
   USER = "user",
   DEPARTMENT = "department",

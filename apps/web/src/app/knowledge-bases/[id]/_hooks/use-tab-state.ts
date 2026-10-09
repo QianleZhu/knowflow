@@ -12,7 +12,6 @@ export type TabValue =
   | "members"
   | "analytics"
   | "relations"
-  | "retrieval-test"
   | "settings"
   | "improvement"
   | "audit-log";

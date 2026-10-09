@@ -6,7 +6,6 @@ import {
   index,
   integer,
   jsonb,
-  numeric,
   pgEnum,
   pgTable,
   real,
@@ -106,13 +105,6 @@ export const agentStatusEnum = pgEnum("agent_status", [
   "published",
   "disabled",
   "archived",
-]);
-export const retrievalModeEnum = pgEnum("retrieval_mode", [
-  "hybrid",
-  "hybrid_rerank",
-  "vector_only",
-  "fts_only",
-  "ki_only",
 ]);
 export const modelProviderTypeEnum = pgEnum("model_provider_type", [
   "openai",
@@ -370,32 +362,6 @@ export const tags = pgTable(
     index("tags_knowledge_base_idx").on(table.knowledgeBaseId),
     uniqueIndex("tags_knowledge_base_name_uidx").on(table.knowledgeBaseId, table.name),
   ],
-);
-
-export const retrievalSettings = pgTable(
-  "retrieval_settings",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    knowledgeBaseId: uuid("knowledge_base_id")
-      .notNull()
-      .references(() => knowledgeBases.id, { onDelete: "cascade" }),
-    mode: retrievalModeEnum("mode").default("hybrid_rerank").notNull(),
-    topK: integer("top_k").default(5).notNull(),
-    similarityThreshold: numeric("similarity_threshold", {
-      precision: 3,
-      scale: 2,
-    })
-      .default("0.70")
-      .notNull(),
-    rerankEnabled: boolean("rerank_enabled").default(true).notNull(),
-    rerankTopN: integer("rerank_top_n").default(30).notNull(),
-    rerankKeepN: integer("rerank_keep_n").default(10).notNull(),
-    vectorWeight: numeric("vector_weight", { precision: 3, scale: 2 }).default("0.50").notNull(),
-    ftsWeight: numeric("fts_weight", { precision: 3, scale: 2 }).default("0.30").notNull(),
-    kiWeight: numeric("ki_weight", { precision: 3, scale: 2 }).default("0.20").notNull(),
-    ...timestamps(),
-  },
-  (table) => [uniqueIndex("retrieval_settings_knowledge_base_uidx").on(table.knowledgeBaseId)],
 );
 
 export const metadataFields = pgTable(

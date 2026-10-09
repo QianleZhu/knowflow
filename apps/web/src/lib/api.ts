@@ -2,15 +2,12 @@ import {
   apiFailureSchema,
   CSRF_COOKIE_NAME,
   CSRF_HEADER_NAME,
-  retrievalTestResponseSchema,
   SECURE_CSRF_COOKIE_NAME,
   tagListResponseSchema,
   tagSchema,
   type CreateTagRequest,
   type KnowledgeTag,
   type ReplaceTagsRequest,
-  type RetrievalTestRequest,
-  type RetrievalTestResponse,
   type TagListResponse,
   type UpdateTagRequest,
 } from "@knowflow/shared";
@@ -184,20 +181,6 @@ export async function apiRequest<TData>(
   }
 
   return dataSchema.parse(body.data);
-}
-
-// ──────────────────────────────────────────────────────────────
-// 检索测试
-// ──────────────────────────────────────────────────────────────
-
-export function retrievalTest(
-  knowledgeBaseId: string,
-  body: RetrievalTestRequest,
-): Promise<RetrievalTestResponse> {
-  return apiRequest(`/knowledge-bases/${knowledgeBaseId}/retrieval-test`, retrievalTestResponseSchema, {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
 }
 
 // ──────────────────────────────────────────────────────────────

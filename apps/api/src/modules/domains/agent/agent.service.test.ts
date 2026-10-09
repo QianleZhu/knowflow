@@ -892,6 +892,7 @@ function makeGenerationState(
       trace: {
         allowedKnowledgeBaseIds: [],
         recalled: { vector: 0, fts: 0, knowledgeItem: 0 },
+        ranked: { vector: 0, fts: 0, knowledgeItem: 0 },
         merged: 0,
         reranked: 0,
         final: retrievalContexts.length,
@@ -910,6 +911,7 @@ function makeGenerationState(
   };
 }
 
+// 构造 Agent 编排测试使用的默认检索上下文。
 function makeRetrievalContext(
   overrides: Partial<NonNullable<AgentState["retrieval"]>["contexts"][number]> = {},
 ): NonNullable<AgentState["retrieval"]>["contexts"][number] {
@@ -928,6 +930,7 @@ function makeRetrievalContext(
     snippet: "Context",
     pageOrSection: null,
     channels: ["fts"],
+    channelRanks: { fts: 1 },
     initialScore: 0.01,
     rerankScore: null,
     knowledgeItemVerified: false,

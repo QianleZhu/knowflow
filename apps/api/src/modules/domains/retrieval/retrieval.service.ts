@@ -7,22 +7,15 @@ import {
   knowledgeItems,
   parentChunks,
 } from "@knowflow/db";
-import type {
-  RetrievalMode,
-  RetrievalSettings,
-  RetrievalTestRequest,
-  RetrievalTestResponse,
-} from "@knowflow/shared";
-import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 
-import { AliyunLlmService, EXPECTED_EMBEDDING_DIMENSION } from "../../../shared/llm/aliyun-llm.js";
+import { AliyunLlmService } from "../../../shared/llm/aliyun-llm.js";
 import type {
   RetrievalCandidate,
   RetrievalChannel,
   RetrievalContextItem,
   RetrievalResult,
 } from "./retrieval.types.js";
-import { RetrievalSettingsService } from "./retrieval-settings.service.js";
 
 const VECTOR_TOP_K = 20;
 const FTS_TOP_K = 20;
@@ -71,26 +64,6 @@ type KnowledgeItemRecallRow = {
   score: number;
 };
 
-type TestCandidate = {
-  type: "child_chunk" | "knowledge_item";
-  id: string;
-  content: string;
-  channels: ("vector" | "fts" | "knowledge_item")[];
-  vectorScore: number | null;
-  ftsScore: number | null;
-  kiScore: number | null;
-  hybridScore: number;
-  rerankScore: number | null;
-  finalScore: number;
-  source: RetrievalTestResponse["results"][number]["source"];
-  knowledgeItem?: RetrievalTestResponse["results"][number]["knowledgeItem"];
-};
-
-type TimedResult<T> = {
-  value: T;
-  elapsedMs: number;
-};
-
 @Injectable()
 export class RetrievalService {
   private readonly logger = new Logger(RetrievalService.name);
@@ -98,10 +71,9 @@ export class RetrievalService {
   constructor(
     @Inject(AliyunLlmService)
     private readonly llm: AliyunLlmService,
-    @Inject(RetrievalSettingsService)
-    private readonly retrievalSettings: RetrievalSettingsService,
   ) {}
 
+  // 编排三路召回，记录每路父块去重后的排名，再进入跨路合并和精排。
   async retrieve(input: {
     query: string;
     rewrittenQueries?: string[];
@@ -145,11 +117,14 @@ export class RetrievalService {
       this.recallFts(ftsQueries, input.allowedKnowledgeBaseIds),
       knowledgeRowsPromise,
     ]);
-    //合并去重
+    // 各路先按父块或知识条目取最高分并排名，之后才跨路合并候选。
+    const vectorCandidates = this.toDocumentCandidates(vectorRows, "vector");
+    const ftsCandidates = this.toDocumentCandidates(ftsRows, "fts");
+    const knowledgeItemCandidates = this.toKnowledgeItemCandidates(knowledgeRows);
     const merged = this.mergeCandidates([
-      ...this.toDocumentCandidates(vectorRows, "vector"),
-      ...this.toDocumentCandidates(ftsRows, "fts"),
-      ...this.toKnowledgeItemCandidates(knowledgeRows),
+      ...vectorCandidates,
+      ...ftsCandidates,
+      ...knowledgeItemCandidates,
     ]);
     let reranked: RetrievalCandidate[];
     try {
@@ -173,6 +148,11 @@ export class RetrievalService {
           fts: ftsRows.length,
           knowledgeItem: knowledgeRows.length,
         },
+        ranked: {
+          vector: vectorCandidates.length,
+          fts: ftsCandidates.length,
+          knowledgeItem: knowledgeItemCandidates.length,
+        },
         merged: merged.length,
         reranked: reranked.length,
         final: contexts.length,
@@ -180,197 +160,7 @@ export class RetrievalService {
     };
   }
 
-  async testRetrieve(input: {
-    knowledgeBaseId: string;
-    request: RetrievalTestRequest;
-    canManage: boolean;
-  }): Promise<RetrievalTestResponse> {
-    const startedAt = Date.now();
-    const storedSettings = await this.retrievalSettings.getForKnowledgeBase(input.knowledgeBaseId);
-    const settings = this.resolveTestSettings(storedSettings, input.request);
-    const mode = settings.mode;
-    const useVector = this.shouldUseVector(mode, input.request.filters.sourceType);
-    const useFts = this.shouldUseFts(mode, input.request.filters.sourceType);
-    const useKnowledgeItems = this.shouldUseKnowledgeItems(mode, input.request.filters.sourceType);
-    const candidateLimit = this.resolveTestCandidateLimit(settings, mode);
-    const embeddingConfig = await this.llm.getModelConfig("embedding");
-
-    let embedding: number[] = [];
-    let embeddingMs = 0;
-    if (useVector || useKnowledgeItems) {
-      const timedEmbedding = await this.timed(async () => {
-        const [queryEmbedding] = await this.llm.embedTexts([input.request.query]);
-        return queryEmbedding ?? [];
-      });
-      embedding = timedEmbedding.value;
-      embeddingMs = timedEmbedding.elapsedMs;
-    }
-
-    const vector = useVector
-      ? await this.recallChannel(
-          "vector",
-          () =>
-            this.timed(() =>
-              this.recallVectorForTest(
-                input.request.query,
-                embedding,
-                input.knowledgeBaseId,
-                settings,
-                input.request.filters.documentStatus,
-                candidateLimit,
-              ),
-            ),
-          [],
-        )
-      : { value: [], elapsedMs: 0 };
-    const fts = useFts
-      ? await this.recallChannel(
-          "fts",
-          () =>
-            this.timed(() =>
-              this.recallFtsForTest(
-                input.request.query,
-                input.knowledgeBaseId,
-                settings,
-                input.request.filters.documentStatus,
-                candidateLimit,
-              ),
-            ),
-          [],
-        )
-      : { value: [], elapsedMs: 0 };
-    const knowledgeItems = useKnowledgeItems
-      ? await this.recallChannel(
-          "knowledge_item",
-          () =>
-            this.timed(() =>
-              this.recallKnowledgeItemsForTest(
-                input.request.query,
-                embedding,
-                input.knowledgeBaseId,
-                settings,
-                input.request.filters.itemStatus,
-                input.canManage,
-                candidateLimit,
-              ),
-            ),
-          [],
-        )
-      : { value: [], elapsedMs: 0 };
-
-    const merged = this.mergeTestCandidates(
-      [
-        ...vector.value.map((row) => this.toTestDocumentCandidate(row, "vector", settings)),
-        ...fts.value.map((row) => this.toTestDocumentCandidate(row, "fts", settings)),
-        ...knowledgeItems.value.map((row) => this.toTestKnowledgeItemCandidate(row, settings)),
-      ],
-      settings,
-    ).sort((left, right) => right.hybridScore - left.hybridScore);
-
-    const shouldRerank = mode === "hybrid_rerank" && settings.rerankEnabled;
-    let rerankMs: number | null = null;
-    let rerankModel: string | null = null;
-    let finalCandidates = merged.slice(0, settings.topK);
-    let afterRerank: number | null = null;
-
-    if (shouldRerank && merged.length > 0) {
-      const rerankStartedAt = Date.now();
-      try {
-        const rerankConfig = await this.llm.getModelConfig("rerank");
-        rerankModel = rerankConfig.model;
-        const target = merged.slice(0, Math.min(settings.rerankTopN, merged.length));
-        const reranked = await this.llm.rerank(
-          input.request.query,
-          target.map((candidate) => candidate.content),
-          Math.min(settings.rerankKeepN, target.length),
-        );
-        const scoreByIndex = new Map(
-          reranked.map((result) => [result.index, result.relevanceScore]),
-        );
-        finalCandidates = target
-          .map((candidate, index) => {
-            const rerankScore = scoreByIndex.get(index) ?? null;
-            return {
-              ...candidate,
-              rerankScore,
-              finalScore: rerankScore ?? candidate.hybridScore,
-            };
-          })
-          .filter((candidate) => candidate.rerankScore !== null)
-          .sort((left, right) => right.finalScore - left.finalScore)
-          .slice(0, settings.rerankKeepN);
-        afterRerank = finalCandidates.length;
-      } catch (error) {
-        this.logger.warn(`Rerank failed, falling back to hybrid sort: ${this.errorMessage(error)}`);
-        finalCandidates = merged
-          .map((candidate) => ({
-            ...candidate,
-            rerankScore: null,
-            finalScore: candidate.hybridScore,
-          }))
-          .sort((left, right) => right.finalScore - left.finalScore)
-          .slice(0, settings.topK);
-      } finally {
-        rerankMs = Date.now() - rerankStartedAt;
-      }
-    }
-
-    const results = finalCandidates.map((candidate, index) => ({
-      rank: index + 1,
-      type: candidate.type,
-      id: candidate.id,
-      content: candidate.content,
-      snippet: this.snippet(candidate.content, 200),
-      channels: candidate.channels,
-      scores: {
-        vectorScore: candidate.vectorScore,
-        ftsScore: candidate.ftsScore,
-        kiScore: candidate.kiScore,
-        hybridScore: candidate.hybridScore,
-        rerankScore: candidate.rerankScore,
-        finalScore: candidate.finalScore,
-      },
-      source: candidate.source,
-      ...(candidate.knowledgeItem === undefined ? {} : { knowledgeItem: candidate.knowledgeItem }),
-    }));
-
-    return {
-      results,
-      debug: {
-        settings: {
-          embeddingModel: embeddingConfig.model,
-          embeddingDimensions: EXPECTED_EMBEDDING_DIMENSION,
-          retrievalMode: mode,
-          topK: settings.topK,
-          similarityThreshold: settings.similarityThreshold,
-          rerankEnabled: shouldRerank,
-          rerankModel,
-          rerankTopN: settings.rerankTopN,
-          rerankKeepN: settings.rerankKeepN,
-          vectorWeight: settings.vectorWeight,
-          ftsWeight: settings.ftsWeight,
-          kiWeight: settings.kiWeight,
-        },
-        performance: {
-          vectorRecalled: vector.value.length,
-          ftsRecalled: fts.value.length,
-          kiRecalled: knowledgeItems.value.length,
-          afterMerge: merged.length,
-          afterRerank,
-          finalCount: results.length,
-          timings: {
-            embeddingMs,
-            vectorMs: vector.elapsedMs,
-            ftsMs: fts.elapsedMs,
-            kiMs: knowledgeItems.elapsedMs,
-            rerankMs,
-            totalMs: Date.now() - startedAt,
-          },
-        },
-      },
-    };
-  }
-
+  // 对每个向量查询先按父块选出最高分子块，再限制唯一父块数量。
   private async recallVector(
     query: string,
     embedding: number[],
@@ -381,12 +171,10 @@ export class RetrievalService {
     }
 
     const vectorText = this.toPgVector(embedding);
-    return db
-      .select(
-        this.documentRecallSelection(
-          sql<number>`1 - (${childChunks.embedding} <=> ${vectorText}::vector)`,
-        ),
-      )
+    const scoreSql = sql<number>`1 - (${childChunks.embedding} <=> ${vectorText}::vector)`;
+    // 先按父块分组并选择相似度最高的子块，外层再按父块分数排序和限量。
+    const bestParentRows = db
+      .selectDistinctOn([parentChunks.id], this.documentRecallSelection(scoreSql))
       .from(childChunks)
       .innerJoin(parentChunks, eq(parentChunks.id, childChunks.parentChunkId))
       .innerJoin(documents, eq(documents.id, childChunks.documentId))
@@ -405,10 +193,16 @@ export class RetrievalService {
           sql`${query} <> ''`,
         ),
       )
-      .orderBy(desc(sql`1 - (${childChunks.embedding} <=> ${vectorText}::vector)`))
+      .orderBy(parentChunks.id, desc(scoreSql), asc(childChunks.id))
+      .as("vector_best_child_per_parent");
+    return db
+      .select()
+      .from(bestParentRows)
+      .orderBy(desc(bestParentRows.score), asc(bestParentRows.parentChunkId))
       .limit(VECTOR_TOP_K);
   }
 
+  // 对全文查询先按父块选出 PGroonga 最高分子块，再限制唯一父块数量。
   private async recallFts(
     queries: string[],
     allowedKnowledgeBaseIds: string[],
@@ -418,8 +212,9 @@ export class RetrievalService {
     // 便于与向量余弦相似度（0~1）跨通道比较；单调变换不影响排序。
     const rawScoreSql = sql<number>`pgroonga_score(${childChunks}.tableoid, ${childChunks}.ctid)`;
     const scoreSql = sql<number>`(${rawScoreSql}) / (1 + (${rawScoreSql}))`;
-    return db
-      .select(this.documentRecallSelection(scoreSql))
+    // 同一父块只保留 PGroonga 得分最高的子块，TopK 因此统计唯一父块数。
+    const bestParentRows = db
+      .selectDistinctOn([parentChunks.id], this.documentRecallSelection(scoreSql))
       .from(childChunks)
       .innerJoin(parentChunks, eq(parentChunks.id, childChunks.parentChunkId))
       .innerJoin(documents, eq(documents.id, childChunks.documentId))
@@ -437,7 +232,12 @@ export class RetrievalService {
           sql`${childChunks.content} &@~ pgroonga_query_escape(${query})`,
         ),
       )
-      .orderBy(desc(scoreSql))
+      .orderBy(parentChunks.id, desc(scoreSql), asc(childChunks.id))
+      .as("fts_best_child_per_parent");
+    return db
+      .select()
+      .from(bestParentRows)
+      .orderBy(desc(bestParentRows.score), asc(bestParentRows.parentChunkId))
       .limit(FTS_TOP_K);
   }
 
@@ -472,109 +272,6 @@ export class RetrievalService {
       )
       .orderBy(desc(sql`1 - (${knowledgeItems.embedding} <=> ${vectorText}::vector)`))
       .limit(KNOWLEDGE_ITEM_TOP_K);
-  }
-
-  private async recallVectorForTest(
-    query: string,
-    embedding: number[],
-    knowledgeBaseId: string,
-    settings: RetrievalSettings,
-    documentStatus: "all" | "completed",
-    candidateLimit: number,
-  ): Promise<DocumentRecallRow[]> {
-    if (embedding.length === 0) {
-      return [];
-    }
-    const vectorText = this.toPgVector(embedding);
-    const scoreSql = sql<number>`1 - (${childChunks.embedding} <=> ${vectorText}::vector)`;
-    return db
-      .select(this.documentRecallSelection(scoreSql))
-      .from(childChunks)
-      .innerJoin(parentChunks, eq(parentChunks.id, childChunks.parentChunkId))
-      .innerJoin(documents, eq(documents.id, childChunks.documentId))
-      .innerJoin(knowledgeBases, eq(knowledgeBases.id, childChunks.knowledgeBaseId))
-      .where(
-        and(
-          eq(childChunks.knowledgeBaseId, knowledgeBaseId),
-          isNull(knowledgeBases.deletedAt),
-          eq(knowledgeBases.status, "active"),
-          eq(documents.enabled, true),
-          this.documentStatusCondition(documentStatus),
-          eq(parentChunks.enabled, true),
-          eq(childChunks.enabled, true),
-          eq(childChunks.embeddingStatus, "completed"),
-          sql`${childChunks.embedding} is not null`,
-          sql`${query} <> ''`,
-          sql`${scoreSql} >= ${settings.similarityThreshold}`,
-        ),
-      )
-      .orderBy(desc(scoreSql))
-      .limit(candidateLimit);
-  }
-
-  private async recallFtsForTest(
-    query: string,
-    knowledgeBaseId: string,
-    settings: RetrievalSettings,
-    documentStatus: "all" | "completed",
-    candidateLimit: number,
-  ): Promise<DocumentRecallRow[]> {
-    const rawScoreSql = sql<number>`pgroonga_score(${childChunks}.tableoid, ${childChunks}.ctid)`;
-    const scoreSql = sql<number>`(${rawScoreSql}) / (1 + (${rawScoreSql}))`;
-    return db
-      .select(this.documentRecallSelection(scoreSql))
-      .from(childChunks)
-      .innerJoin(parentChunks, eq(parentChunks.id, childChunks.parentChunkId))
-      .innerJoin(documents, eq(documents.id, childChunks.documentId))
-      .innerJoin(knowledgeBases, eq(knowledgeBases.id, childChunks.knowledgeBaseId))
-      .where(
-        and(
-          eq(childChunks.knowledgeBaseId, knowledgeBaseId),
-          isNull(knowledgeBases.deletedAt),
-          eq(knowledgeBases.status, "active"),
-          eq(documents.enabled, true),
-          this.documentStatusCondition(documentStatus),
-          eq(parentChunks.enabled, true),
-          eq(childChunks.enabled, true),
-          sql`${childChunks.content} &@~ pgroonga_query_escape(${query})`,
-        ),
-      )
-      .orderBy(desc(scoreSql))
-      .limit(candidateLimit);
-  }
-
-  private async recallKnowledgeItemsForTest(
-    query: string,
-    embedding: number[],
-    knowledgeBaseId: string,
-    settings: RetrievalSettings,
-    itemStatus: "all" | "published",
-    canManage: boolean,
-    candidateLimit: number,
-  ): Promise<KnowledgeItemRecallRow[]> {
-    if (embedding.length === 0) {
-      return [];
-    }
-    const vectorText = this.toPgVector(embedding);
-    const scoreSql = sql<number>`1 - (${knowledgeItems.embedding} <=> ${vectorText}::vector)`;
-    return db
-      .select(this.knowledgeItemRecallSelection(scoreSql))
-      .from(knowledgeItems)
-      .innerJoin(knowledgeBases, eq(knowledgeBases.id, knowledgeItems.knowledgeBaseId))
-      .where(
-        and(
-          eq(knowledgeItems.knowledgeBaseId, knowledgeBaseId),
-          isNull(knowledgeBases.deletedAt),
-          eq(knowledgeBases.status, "active"),
-          eq(knowledgeItems.enabled, true),
-          this.knowledgeItemStatusCondition(itemStatus, canManage),
-          sql`${knowledgeItems.embedding} is not null`,
-          sql`${query} <> ''`,
-          sql`${scoreSql} >= ${settings.similarityThreshold}`,
-        ),
-      )
-      .orderBy(desc(scoreSql))
-      .limit(candidateLimit);
   }
 
   private documentRecallSelection(score: ReturnType<typeof sql<number>>) {
@@ -621,11 +318,48 @@ export class RetrievalService {
     };
   }
 
+  // 按业务主键保留最高分命中，并仅在唯一结果集合上生成从 1 开始的路内名次。
+  private dedupeAndRankByMaxScore<T>(
+    rows: T[],
+    getKey: (row: T) => string,
+    getScore: (row: T) => number,
+    getTieKey: (row: T) => string = getKey,
+  ): { row: T; rank: number }[] {
+    const bestByKey = new Map<string, T>();
+    for (const row of rows) {
+      const key = getKey(row);
+      const existing = bestByKey.get(key);
+      if (
+        existing === undefined ||
+        getScore(row) > getScore(existing) ||
+        (getScore(row) === getScore(existing) && getTieKey(row) < getTieKey(existing))
+      ) {
+        bestByKey.set(key, row);
+      }
+    }
+
+    return [...bestByKey.entries()]
+      .sort(([leftKey, leftRow], [rightKey, rightRow]) => {
+        const scoreDifference = getScore(rightRow) - getScore(leftRow);
+        if (scoreDifference !== 0) {
+          return scoreDifference;
+        }
+        return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+      })
+      .map(([, row], index) => ({ row, rank: index + 1 }));
+  }
+
+  // 将父块重复命中压成单个文档候选，并保存该通道内的 Max 分数排名。
   private toDocumentCandidates(
     rows: DocumentRecallRow[],
     channel: Extract<RetrievalChannel, "vector" | "fts">,
   ): RetrievalCandidate[] {
-    return rows.map((row) => ({
+    return this.dedupeAndRankByMaxScore(
+      rows,
+      (row) => row.parentChunkId,
+      (row) => row.score,
+      (row) => row.childChunkId,
+    ).map(({ row, rank }) => ({
       id: row.parentChunkId,
       sourceType: "knowledge_document",
       knowledgeBaseId: row.knowledgeBaseId,
@@ -640,6 +374,7 @@ export class RetrievalService {
       snippet: this.snippet(row.content, 260),
       pageOrSection: row.pageOrSection,
       channels: [channel],
+      channelRanks: { [channel]: rank },
       initialScore: row.score,
       rerankScore: null,
       knowledgeItemVerified: false,
@@ -648,8 +383,13 @@ export class RetrievalService {
     }));
   }
 
+  // 知识条目按条目 ID 取跨查询的最高分，再为该召回通道生成排名。
   private toKnowledgeItemCandidates(rows: KnowledgeItemRecallRow[]): RetrievalCandidate[] {
-    return rows.map((row) => ({
+    return this.dedupeAndRankByMaxScore(
+      rows,
+      (row) => row.knowledgeItemId,
+      (row) => row.score,
+    ).map(({ row, rank }) => ({
       id: row.knowledgeItemId,
       sourceType: "knowledge_item",
       knowledgeBaseId: row.knowledgeBaseId,
@@ -664,6 +404,7 @@ export class RetrievalService {
       snippet: this.snippet(row.content, 260),
       pageOrSection: null,
       channels: ["knowledge_item"],
+      channelRanks: { knowledge_item: rank },
       initialScore: row.score,
       rerankScore: null,
       knowledgeItemVerified: row.verifiedBy !== null,
@@ -672,85 +413,7 @@ export class RetrievalService {
     }));
   }
 
-  private toTestDocumentCandidate(
-    row: DocumentRecallRow,
-    channel: "vector" | "fts",
-    settings: RetrievalSettings,
-  ): TestCandidate {
-    const vectorScore = channel === "vector" ? this.roundScore(row.score) : null;
-    const ftsScore = channel === "fts" ? this.roundScore(row.score) : null;
-    const hybridScore = this.hybridScore(settings, vectorScore, ftsScore, null);
-    return {
-      type: "child_chunk",
-      id: row.childChunkId,
-      content: row.content,
-      channels: [channel],
-      vectorScore,
-      ftsScore,
-      kiScore: null,
-      hybridScore,
-      rerankScore: null,
-      finalScore: hybridScore,
-      source: {
-        documentId: row.documentId,
-        documentTitle: row.title,
-        parentChunkId: row.parentChunkId,
-        parentChunkTitle: row.parentTitle,
-        parentContent: row.parentContent,
-        headingPath: this.normalizeHeadingPath(row.headingPath),
-        pageStart: row.pageStart,
-        pageEnd: row.pageEnd,
-        chunkIndex: row.chunkIndex,
-        tokenCount: row.tokenCount,
-        createdAt: row.createdAt.toISOString(),
-      },
-    };
-  }
-
-  private toTestKnowledgeItemCandidate(
-    row: KnowledgeItemRecallRow,
-    settings: RetrievalSettings,
-  ): TestCandidate {
-    const kiScore = this.roundScore(row.score);
-    const hybridScore = this.hybridScore(settings, null, null, kiScore);
-    return {
-      type: "knowledge_item",
-      id: row.knowledgeItemId,
-      content: row.content,
-      channels: ["knowledge_item"],
-      vectorScore: null,
-      ftsScore: null,
-      kiScore,
-      hybridScore,
-      rerankScore: null,
-      finalScore: hybridScore,
-      source: {
-        documentId: null,
-        documentTitle: null,
-        parentChunkId: null,
-        parentChunkTitle: null,
-        parentContent: null,
-        headingPath: null,
-        pageStart: null,
-        pageEnd: null,
-        chunkIndex: null,
-        tokenCount: this.estimateTokenCount(row.content),
-        createdAt: row.createdAt.toISOString(),
-      },
-      knowledgeItem: {
-        title: row.title,
-        status: row.status,
-        summary: row.summary,
-        createdBy: row.createdBy,
-        verifiedBy: row.verifiedBy,
-        verifiedAt: row.verifiedAt?.toISOString() ?? null,
-        viewCount: row.viewCount,
-        citeCount: row.citeCount,
-        likeCount: row.likeCount,
-      },
-    };
-  }
-
+  // 合并同一文档父块或知识条目在不同召回通道中的结果，并保留各路名次。
   private mergeCandidates(candidates: RetrievalCandidate[]): RetrievalCandidate[] {
     const byKey = new Map<string, RetrievalCandidate>();
     for (const candidate of candidates) {
@@ -765,6 +428,7 @@ export class RetrievalService {
       byKey.set(key, {
         ...existing,
         channels: [...channels],
+        channelRanks: { ...existing.channelRanks, ...candidate.channelRanks },
         initialScore: Math.max(existing.initialScore, candidate.initialScore),
         childChunkId: existing.childChunkId ?? candidate.childChunkId,
         content:
@@ -775,38 +439,6 @@ export class RetrievalService {
     }
 
     return [...byKey.values()].sort((left, right) => right.initialScore - left.initialScore);
-  }
-
-  private mergeTestCandidates(
-    candidates: TestCandidate[],
-    settings: RetrievalSettings,
-  ): TestCandidate[] {
-    const byKey = new Map<string, TestCandidate>();
-    for (const candidate of candidates) {
-      const key = `${candidate.type}:${candidate.id}`;
-      const existing = byKey.get(key);
-      if (existing === undefined) {
-        byKey.set(key, candidate);
-        continue;
-      }
-
-      const channels = [...new Set([...existing.channels, ...candidate.channels])];
-      const vectorScore = this.maxNullable(existing.vectorScore, candidate.vectorScore);
-      const ftsScore = this.maxNullable(existing.ftsScore, candidate.ftsScore);
-      const kiScore = this.maxNullable(existing.kiScore, candidate.kiScore);
-      const hybridScore = this.hybridScore(settings, vectorScore, ftsScore, kiScore);
-      byKey.set(key, {
-        ...existing,
-        channels,
-        vectorScore,
-        ftsScore,
-        kiScore,
-        hybridScore,
-        finalScore: hybridScore,
-      });
-    }
-
-    return [...byKey.values()];
   }
 
   private async rerank(
@@ -865,122 +497,6 @@ export class RetrievalService {
     return contexts;
   }
 
-  private resolveTestSettings(
-    storedSettings: RetrievalSettings,
-    request: RetrievalTestRequest,
-  ): RetrievalSettings {
-    const mode =
-      request.mode === undefined || request.mode === "default" ? storedSettings.mode : request.mode;
-    const overrides = request.overrides;
-    return {
-      mode,
-      topK: overrides?.topK ?? storedSettings.topK,
-      similarityThreshold: overrides?.similarityThreshold ?? storedSettings.similarityThreshold,
-      rerankEnabled: overrides?.rerankEnabled ?? storedSettings.rerankEnabled,
-      rerankTopN: overrides?.rerankTopN ?? storedSettings.rerankTopN,
-      rerankKeepN: overrides?.rerankKeepN ?? storedSettings.rerankKeepN,
-      vectorWeight: overrides?.vectorWeight ?? storedSettings.vectorWeight,
-      ftsWeight: overrides?.ftsWeight ?? storedSettings.ftsWeight,
-      kiWeight: overrides?.kiWeight ?? storedSettings.kiWeight,
-    };
-  }
-
-  private resolveTestCandidateLimit(settings: RetrievalSettings, mode: RetrievalMode): number {
-    if (mode === "hybrid_rerank" && settings.rerankEnabled) {
-      return Math.max(settings.topK, settings.rerankTopN);
-    }
-
-    return settings.topK;
-  }
-
-  private shouldUseVector(
-    mode: RetrievalMode,
-    sourceType: "all" | "chunk" | "knowledge_item",
-  ): boolean {
-    return (
-      sourceType !== "knowledge_item" &&
-      (mode === "vector_only" || mode === "hybrid" || mode === "hybrid_rerank")
-    );
-  }
-
-  private shouldUseFts(
-    mode: RetrievalMode,
-    sourceType: "all" | "chunk" | "knowledge_item",
-  ): boolean {
-    return (
-      sourceType !== "knowledge_item" &&
-      (mode === "fts_only" || mode === "hybrid" || mode === "hybrid_rerank")
-    );
-  }
-
-  private shouldUseKnowledgeItems(
-    mode: RetrievalMode,
-    sourceType: "all" | "chunk" | "knowledge_item",
-  ): boolean {
-    return (
-      sourceType !== "chunk" &&
-      (mode === "ki_only" || mode === "hybrid" || mode === "hybrid_rerank")
-    );
-  }
-
-  private documentStatusCondition(documentStatus: "all" | "completed") {
-    return documentStatus === "all"
-      ? inArray(documents.processStatus, ["completed", "failed"])
-      : eq(documents.processStatus, "completed");
-  }
-
-  private knowledgeItemStatusCondition(itemStatus: "all" | "published", canManage: boolean) {
-    if (itemStatus === "all" && canManage) {
-      return inArray(knowledgeItems.status, ["published", "unpublished", "expired"]);
-    }
-    return eq(knowledgeItems.status, "published");
-  }
-
-  private async recallChannel<T>(
-    channel: string,
-    recall: () => Promise<TimedResult<T>>,
-    fallback: T,
-  ): Promise<TimedResult<T>> {
-    try {
-      return await recall();
-    } catch (error) {
-      this.logger.warn(`${channel} recall failed: ${this.errorMessage(error)}`);
-      return { value: fallback, elapsedMs: 0 };
-    }
-  }
-
-  private async timed<T>(operation: () => Promise<T>): Promise<TimedResult<T>> {
-    const startedAt = Date.now();
-    const value = await operation();
-    return {
-      value,
-      elapsedMs: Date.now() - startedAt,
-    };
-  }
-
-  private hybridScore(
-    settings: RetrievalSettings,
-    vectorScore: number | null,
-    ftsScore: number | null,
-    kiScore: number | null,
-  ): number {
-    return this.roundScore(
-      (vectorScore ?? 0) * settings.vectorWeight +
-        (ftsScore ?? 0) * settings.ftsWeight +
-        (kiScore ?? 0) * settings.kiWeight,
-    );
-  }
-
-  private maxNullable(left: number | null, right: number | null): number | null {
-    if (left === null) {
-      return right;
-    }
-    if (right === null) {
-      return left;
-    }
-    return Math.max(left, right);
-  }
-
   private normalizeHeadingPath(value: unknown): string[] | null {
     if (!Array.isArray(value)) {
       return null;
@@ -1014,6 +530,7 @@ export class RetrievalService {
     return error instanceof Error ? error.message : String(error);
   }
 
+  // 在无查询或无授权知识库时返回结构完整的空召回结果。
   private emptyResult(
     query: string,
     rewrittenQueries: string[],
@@ -1029,6 +546,11 @@ export class RetrievalService {
       trace: {
         allowedKnowledgeBaseIds,
         recalled: {
+          vector: 0,
+          fts: 0,
+          knowledgeItem: 0,
+        },
+        ranked: {
           vector: 0,
           fts: 0,
           knowledgeItem: 0,

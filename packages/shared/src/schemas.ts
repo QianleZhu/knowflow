@@ -7,13 +7,8 @@ import {
   DOCUMENT_SOURCE_TYPES,
   AUDIT_RESULTS,
   AUDIT_TARGET_TYPES,
-  RETRIEVAL_DOCUMENT_STATUS_FILTERS,
-  RETRIEVAL_ITEM_STATUS_FILTERS,
   MIND_MAP_NODE_STATUSES,
   MIND_MAP_NODE_TYPES,
-  RETRIEVAL_MODES,
-  RETRIEVAL_SOURCE_TYPES,
-  RETRIEVAL_TEST_MODES,
   AGENT_STATUSES,
   AGENT_TYPES,
   AGENT_VISIBILITIES,
@@ -57,11 +52,6 @@ export const modelTypeSchema = z.enum(MODEL_TYPES);
 export const agentTypeSchema = z.enum(AGENT_TYPES);
 export const agentVisibilitySchema = z.enum(AGENT_VISIBILITIES);
 export const agentStatusSchema = z.enum(AGENT_STATUSES);
-export const retrievalModeSchema = z.enum(RETRIEVAL_MODES);
-export const retrievalTestModeSchema = z.enum(RETRIEVAL_TEST_MODES);
-export const retrievalSourceTypeSchema = z.enum(RETRIEVAL_SOURCE_TYPES);
-export const retrievalDocumentStatusFilterSchema = z.enum(RETRIEVAL_DOCUMENT_STATUS_FILTERS);
-export const retrievalItemStatusFilterSchema = z.enum(RETRIEVAL_ITEM_STATUS_FILTERS);
 export const confidenceLevelSchema = z.enum(CONFIDENCE_LEVELS);
 export const noAnswerTypeSchema = z.enum(NO_ANSWER_TYPES);
 export const citationSourceTypeSchema = z.enum(CITATION_SOURCE_TYPES);
@@ -542,127 +532,6 @@ export const updateKnowledgeItemRequestSchema = createKnowledgeItemRequestSchema
 
 export const knowledgeItemFeedbackRequestSchema = z.object({
   rating: knowledgeItemFeedbackRatingSchema.nullable(),
-});
-
-export const retrievalSettingsSchema = z.object({
-  mode: retrievalModeSchema,
-  topK: z.number().int().min(1).max(50),
-  similarityThreshold: z.number().min(0).max(1),
-  rerankEnabled: z.boolean(),
-  rerankTopN: z.number().int().min(1).max(100),
-  rerankKeepN: z.number().int().min(1).max(50),
-  vectorWeight: z.number().min(0).max(1),
-  ftsWeight: z.number().min(0).max(1),
-  kiWeight: z.number().min(0).max(1),
-});
-
-export const updateRetrievalSettingsRequestSchema = retrievalSettingsSchema.refine(
-  (value) => value.rerankKeepN <= value.rerankTopN,
-  {
-    message: "rerankKeepN 必须小于或等于 rerankTopN",
-    path: ["rerankKeepN"],
-  },
-);
-
-export const retrievalTestRequestSchema = z.object({
-  query: z.string().trim().min(1).max(500),
-  mode: retrievalTestModeSchema.optional(),
-  filters: z
-    .object({
-      documentStatus: retrievalDocumentStatusFilterSchema.default("completed"),
-      itemStatus: retrievalItemStatusFilterSchema.default("published"),
-      sourceType: retrievalSourceTypeSchema.default("all"),
-    })
-    .default({
-      documentStatus: "completed",
-      itemStatus: "published",
-      sourceType: "all",
-    }),
-  overrides: retrievalSettingsSchema
-    .omit({ mode: true })
-    .partial()
-    .refine(
-      (value) =>
-        value.rerankKeepN === undefined ||
-        value.rerankTopN === undefined ||
-        value.rerankKeepN <= value.rerankTopN,
-      {
-        message: "rerankKeepN 必须小于或等于 rerankTopN",
-        path: ["rerankKeepN"],
-      },
-    )
-    .optional(),
-});
-
-export const retrievalTestResultSchema = z.object({
-  rank: z.number().int().positive(),
-  type: z.enum(["child_chunk", "knowledge_item"]),
-  id: z.uuid(),
-  content: z.string(),
-  snippet: z.string(),
-  channels: z.array(z.enum(["vector", "fts", "knowledge_item"])),
-  scores: z.object({
-    vectorScore: z.number().nullable(),
-    ftsScore: z.number().nullable(),
-    kiScore: z.number().nullable(),
-    hybridScore: z.number().nullable(),
-    rerankScore: z.number().nullable(),
-    finalScore: z.number(),
-  }),
-  source: z.object({
-    documentId: z.uuid().nullable(),
-    documentTitle: z.string().nullable(),
-    parentChunkId: z.uuid().nullable(),
-    parentChunkTitle: z.string().nullable(),
-    parentContent: z.string().nullable(),
-    headingPath: z.array(z.string()).nullable(),
-    pageStart: z.number().int().nullable(),
-    pageEnd: z.number().int().nullable(),
-    chunkIndex: z.number().int().nullable(),
-    tokenCount: z.number().int().nullable(),
-    createdAt: z.iso.datetime().nullable(),
-  }),
-  knowledgeItem: z
-    .object({
-      title: z.string(),
-      status: knowledgeItemStatusSchema,
-      summary: z.string().nullable(),
-      createdBy: z.uuid(),
-      verifiedBy: z.uuid().nullable(),
-      verifiedAt: z.iso.datetime().nullable(),
-      viewCount: z.number().int().nonnegative(),
-      citeCount: z.number().int().nonnegative(),
-      likeCount: z.number().int().nonnegative(),
-    })
-    .optional(),
-});
-
-export const retrievalTestResponseSchema = z.object({
-  results: z.array(retrievalTestResultSchema),
-  debug: z.object({
-    settings: retrievalSettingsSchema.omit({ mode: true }).extend({
-      embeddingModel: z.string(),
-      embeddingDimensions: z.number().int().positive(),
-      retrievalMode: retrievalModeSchema,
-      rerankModel: z.string().nullable(),
-    }),
-    performance: z.object({
-      vectorRecalled: z.number().int().nonnegative(),
-      ftsRecalled: z.number().int().nonnegative(),
-      kiRecalled: z.number().int().nonnegative(),
-      afterMerge: z.number().int().nonnegative(),
-      afterRerank: z.number().int().nonnegative().nullable(),
-      finalCount: z.number().int().nonnegative(),
-      timings: z.object({
-        embeddingMs: z.number().int().nonnegative(),
-        vectorMs: z.number().int().nonnegative(),
-        ftsMs: z.number().int().nonnegative(),
-        kiMs: z.number().int().nonnegative(),
-        rerankMs: z.number().int().nonnegative().nullable(),
-        totalMs: z.number().int().nonnegative(),
-      }),
-    }),
-  }),
 });
 
 export const auditLogListQuerySchema = z.object({
@@ -1352,12 +1221,6 @@ export type KnowledgeItemListResponse = z.infer<typeof knowledgeItemListResponse
 export type CreateKnowledgeItemRequest = z.infer<typeof createKnowledgeItemRequestSchema>;
 export type UpdateKnowledgeItemRequest = z.infer<typeof updateKnowledgeItemRequestSchema>;
 export type KnowledgeItemFeedbackRequest = z.infer<typeof knowledgeItemFeedbackRequestSchema>;
-export type RetrievalMode = z.infer<typeof retrievalModeSchema>;
-export type RetrievalTestMode = z.infer<typeof retrievalTestModeSchema>;
-export type RetrievalSettings = z.infer<typeof retrievalSettingsSchema>;
-export type UpdateRetrievalSettingsRequest = z.infer<typeof updateRetrievalSettingsRequestSchema>;
-export type RetrievalTestRequest = z.infer<typeof retrievalTestRequestSchema>;
-export type RetrievalTestResponse = z.infer<typeof retrievalTestResponseSchema>;
 export type AuditTargetTypeValue = z.infer<typeof auditTargetTypeSchema>;
 export type AuditResult = z.infer<typeof auditResultSchema>;
 export type AuditLogListQuery = z.infer<typeof auditLogListQuerySchema>;

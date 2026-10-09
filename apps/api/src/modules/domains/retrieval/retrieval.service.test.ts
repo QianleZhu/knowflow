@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 
 import { AliyunLlmService } from "../../../shared/llm/aliyun-llm.js";
 import { RetrievalService } from "./retrieval.service.js";
-import type { RetrievalSettingsService } from "./retrieval-settings.service.js";
 
 type RecallDocumentRow = {
   id: string;
@@ -55,11 +54,9 @@ class FailingRerankLlmService extends AliyunLlmService {
   }
 }
 
-const unusedRetrievalSettings = {} as RetrievalSettingsService;
-
 void describe("RetrievalService.retrieve", () => {
   void it("falls back to initial ranking when rerank fails", async () => {
-    const service = new RetrievalService(new FailingRerankLlmService(), unusedRetrievalSettings);
+    const service = new RetrievalService(new FailingRerankLlmService());
     Object.assign(service as object, {
       recallVector: (): Promise<RecallDocumentRow[]> =>
         Promise.resolve([
