@@ -44,19 +44,15 @@ type RecallKnowledgeItemRow = {
   score: number;
 };
 
-class FailingRerankLlmService extends AliyunLlmService {
+class RetrievalLlmService extends AliyunLlmService {
   override embedTexts(texts: string[]): Promise<number[][]> {
     return Promise.resolve(texts.map(() => [0.1, 0.2, 0.3]));
-  }
-
-  override rerank(): Promise<never> {
-    return Promise.reject(new Error("rerank service unavailable"));
   }
 }
 
 void describe("RetrievalService.retrieve", () => {
-  void it("falls back to initial ranking when rerank fails", async () => {
-    const service = new RetrievalService(new FailingRerankLlmService());
+  void it("returns RRF scores and overall ranks before the rerank node", async () => {
+    const service = new RetrievalService(new RetrievalLlmService());
     Object.assign(service as object, {
       recallVector: (): Promise<RecallDocumentRow[]> =>
         Promise.resolve([
@@ -95,15 +91,21 @@ void describe("RetrievalService.retrieve", () => {
       result.candidates.map((candidate) => candidate.id),
       ["parent-high", "ki-middle", "parent-low"],
     );
+    assert.deepEqual(
+      result.candidates.map((candidate) => candidate.rrfRank),
+      [1, 2, 3],
+    );
+    assert.equal(result.candidates[0]?.rrfScore, 1 / 61);
+    assert.equal(result.candidates[2]?.rrfScore, 1 / 62);
     assert.equal(result.contexts.length, 3);
     assert.deepEqual(
       result.contexts.map((context) => context.citationIndex),
       [1, 2, 3],
     );
-    assert.equal(result.candidates[0]?.rerankScore, null);
+    assert.equal(result.candidates[0].rerankScore, null);
     assert.equal(result.trace.recalled.vector, 2);
     assert.equal(result.trace.recalled.knowledgeItem, 1);
-    assert.equal(result.trace.reranked, 3);
+    assert.equal(result.trace.reranked, 0);
     assert.equal(result.trace.final, 3);
   });
 });

@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from "@nestjs/common";
+import { Inject, Injectable } from "@nestjs/common";
 import {
   childChunks,
   db,
@@ -13,16 +13,32 @@ import { AliyunLlmService } from "../../../shared/llm/aliyun-llm.js";
 import type {
   RetrievalCandidate,
   RetrievalChannel,
+  RetrievalChannelFailure,
   RetrievalContextItem,
   RetrievalResult,
 } from "./retrieval.types.js";
 
+// 携带全部通道失败时的检索追踪结果，让 Agent 错误处理器可以持久化后终止链路。
+export class RetrievalAllChannelsFailedError extends Error {
+  // 保留完整检索结果，让编排层在终止前落库失败追踪。
+  constructor(readonly result: RetrievalResult) {
+    super("所有召回通道均失败，检索链路已终止");
+    this.name = RetrievalAllChannelsFailedError.name;
+  }
+}
+
 const VECTOR_TOP_K = 20;
 const FTS_TOP_K = 20;
 const KNOWLEDGE_ITEM_TOP_K = 10;
-const RERANK_TOP_N = 30;
-const RERANK_KEEP_N = 10;
 const MAX_CONTEXT_TOKENS = 6000;
+// 使用标准 RRF 平滑常数，避免靠后名次的贡献过低。
+const RRF_K = 60;
+
+type ChannelRecallCollection = {
+  recalled: number;
+  candidates: RetrievalCandidate[];
+  failure: RetrievalChannelFailure | null;
+};
 
 type DocumentRecallRow = {
   id: string;
@@ -66,14 +82,12 @@ type KnowledgeItemRecallRow = {
 
 @Injectable()
 export class RetrievalService {
-  private readonly logger = new Logger(RetrievalService.name);
-
   constructor(
     @Inject(AliyunLlmService)
     private readonly llm: AliyunLlmService,
   ) {}
 
-  // 编排三路召回，记录每路父块去重后的排名，再进入跨路合并和精排。
+  // 编排三路召回，记录路内名次并计算跨路 RRF 总分和总排名。
   async retrieve(input: {
     query: string;
     rewrittenQueries?: string[];
@@ -94,70 +108,103 @@ export class RetrievalService {
       );
     }
 
-    // 一次生成所有语义查询的向量，避免改写查询被遗漏或重复请求模型。
-    const queryEmbeddings = await this.llm.embedTexts(vectorQueries);
-    // 原文和改写分别召回后统一合并，文档和知识条目都覆盖两条语义查询。
-    const vectorRowsPromise = Promise.all(
-      vectorQueries.map((query, index) =>
-        this.recallVector(query, queryEmbeddings[index] ?? [], input.allowedKnowledgeBaseIds),
+    // 向量与知识条目共用查询向量；全文召回独立运行，避免 embedding 故障阻断 FTS。
+    const queryEmbeddingsPromise = Promise.resolve().then(() => this.llm.embedTexts(vectorQueries));
+    const [vectorResult, ftsResult, knowledgeItemResult] = await Promise.all([
+      this.collectChannelRows(
+        "vector",
+        async () => {
+          const queryEmbeddings = await queryEmbeddingsPromise;
+          const rows = await Promise.all(
+            vectorQueries.map((query, index) =>
+              this.recallVector(query, queryEmbeddings[index] ?? [], input.allowedKnowledgeBaseIds),
+            ),
+          );
+          return rows.flat();
+        },
+        (rows) => this.toDocumentCandidates(rows, "vector"),
       ),
-    ).then((rows) => rows.flat());
-    const knowledgeRowsPromise = Promise.all(
-      vectorQueries.map((query, index) =>
-        this.recallKnowledgeItems(
-          query,
-          queryEmbeddings[index] ?? [],
-          input.allowedKnowledgeBaseIds,
-        ),
+      this.collectChannelRows(
+        "fts",
+        () => this.recallFts(ftsQueries, input.allowedKnowledgeBaseIds),
+        (rows) => this.toDocumentCandidates(rows, "fts"),
       ),
-    ).then((rows) => rows.flat());
-    // 三路并行召回；全文检索只接收原文和关键词扩展结果。
-    const [vectorRows, ftsRows, knowledgeRows] = await Promise.all([
-      vectorRowsPromise,
-      this.recallFts(ftsQueries, input.allowedKnowledgeBaseIds),
-      knowledgeRowsPromise,
+      this.collectChannelRows(
+        "knowledge_item",
+        async () => {
+          const queryEmbeddings = await queryEmbeddingsPromise;
+          const rows = await Promise.all(
+            vectorQueries.map((query, index) =>
+              this.recallKnowledgeItems(
+                query,
+                queryEmbeddings[index] ?? [],
+                input.allowedKnowledgeBaseIds,
+              ),
+            ),
+          );
+          return rows.flat();
+        },
+        (rows) => this.toKnowledgeItemCandidates(rows),
+      ),
     ]);
-    // 各路先按父块或知识条目取最高分并排名，之后才跨路合并候选。
-    const vectorCandidates = this.toDocumentCandidates(vectorRows, "vector");
-    const ftsCandidates = this.toDocumentCandidates(ftsRows, "fts");
-    const knowledgeItemCandidates = this.toKnowledgeItemCandidates(knowledgeRows);
+    // 汇总各路独立结果和失败记录；成功通道照常参与后续 RRF 融合。
+    const channelFailures = [vectorResult, ftsResult, knowledgeItemResult]
+      .map((result) => result.failure)
+      .filter((failure): failure is RetrievalChannelFailure => failure !== null);
     const merged = this.mergeCandidates([
-      ...vectorCandidates,
-      ...ftsCandidates,
-      ...knowledgeItemCandidates,
+      ...vectorResult.candidates,
+      ...ftsResult.candidates,
+      ...knowledgeItemResult.candidates,
     ]);
-    let reranked: RetrievalCandidate[];
-    try {
-      reranked = await this.rerank(input.query, merged);
-    } catch (error) {
-      this.logger.warn(`Rerank failed, falling back to initial sort: ${this.errorMessage(error)}`);
-      reranked = this.fallbackToInitialSort(merged);
-    }
-    const contexts = this.applyTokenBudget(reranked);
+    const contexts = this.applyTokenBudget(merged);
 
-    return {
+    const result: RetrievalResult = {
       query: input.query,
       rewrittenQueries,
       expandedKeywords,
-      candidates: reranked,
+      candidates: merged,
       contexts,
       trace: {
         allowedKnowledgeBaseIds: input.allowedKnowledgeBaseIds,
         recalled: {
-          vector: vectorRows.length,
-          fts: ftsRows.length,
-          knowledgeItem: knowledgeRows.length,
+          vector: vectorResult.recalled,
+          fts: ftsResult.recalled,
+          knowledgeItem: knowledgeItemResult.recalled,
         },
         ranked: {
-          vector: vectorCandidates.length,
-          fts: ftsCandidates.length,
-          knowledgeItem: knowledgeItemCandidates.length,
+          vector: vectorResult.candidates.length,
+          fts: ftsResult.candidates.length,
+          knowledgeItem: knowledgeItemResult.candidates.length,
         },
         merged: merged.length,
-        reranked: reranked.length,
+        reranked: 0,
         final: contexts.length,
+        channelFailures,
       },
     };
+
+    if (channelFailures.length === 3) {
+      throw new RetrievalAllChannelsFailedError(result);
+    }
+    return result;
+  }
+
+  // 单独收集每个召回通道；失败时记录错误并返回空结果，不影响其他通道。
+  private async collectChannelRows<T>(
+    channel: RetrievalChannel,
+    recall: () => Promise<T[]>,
+    rank: (rows: T[]) => RetrievalCandidate[],
+  ): Promise<ChannelRecallCollection> {
+    try {
+      const rows = await recall();
+      return { recalled: rows.length, candidates: rank(rows), failure: null };
+    } catch (error) {
+      return {
+        recalled: 0,
+        candidates: [],
+        failure: { channel, message: this.errorMessage(error) },
+      };
+    }
   }
 
   // 对每个向量查询先按父块选出最高分子块，再限制唯一父块数量。
@@ -375,6 +422,8 @@ export class RetrievalService {
       pageOrSection: row.pageOrSection,
       channels: [channel],
       channelRanks: { [channel]: rank },
+      rrfScore: 0,
+      rrfRank: 0,
       initialScore: row.score,
       rerankScore: null,
       knowledgeItemVerified: false,
@@ -405,6 +454,8 @@ export class RetrievalService {
       pageOrSection: null,
       channels: ["knowledge_item"],
       channelRanks: { knowledge_item: rank },
+      rrfScore: 0,
+      rrfRank: 0,
       initialScore: row.score,
       rerankScore: null,
       knowledgeItemVerified: row.verifiedBy !== null,
@@ -438,44 +489,33 @@ export class RetrievalService {
       });
     }
 
-    return [...byKey.values()].sort((left, right) => right.initialScore - left.initialScore);
-  }
-
-  private async rerank(
-    query: string,
-    candidates: RetrievalCandidate[],
-  ): Promise<RetrievalCandidate[]> {
-    const target = candidates.slice(0, RERANK_TOP_N);
-    if (target.length === 0) {
-      return [];
-    }
-
-    const results = await this.llm.rerank(
-      query,
-      target.map((candidate) => this.contextText(candidate)),
-      Math.min(RERANK_KEEP_N, target.length),
-    );
-    const byIndex = new Map(results.map((result) => [result.index, result.relevanceScore]));
-    return target
-      .map((candidate, index) => ({
-        ...candidate,
-        rerankScore: byIndex.get(index) ?? null,
-      }))
-      .filter((candidate) => candidate.rerankScore !== null)
-      .sort((left, right) => (right.rerankScore ?? 0) - (left.rerankScore ?? 0))
-      .slice(0, RERANK_KEEP_N);
-  }
-
-  private fallbackToInitialSort(candidates: RetrievalCandidate[]): RetrievalCandidate[] {
-    return candidates
+    // 跨路合并后统一累加命中通道的倒数名次，再生成稳定的总排名。
+    return [...byKey.values()]
       .map((candidate) => ({
         ...candidate,
-        rerankScore: null,
+        rrfScore: this.calculateRrfScore(candidate.channelRanks),
       }))
-      .sort((left, right) => right.initialScore - left.initialScore)
-      .slice(0, RERANK_KEEP_N);
+      .sort((left, right) => {
+        const scoreDifference = right.rrfScore - left.rrfScore;
+        if (scoreDifference !== 0) {
+          return scoreDifference;
+        }
+        const leftKey = `${left.sourceType}:${left.id}`;
+        const rightKey = `${right.sourceType}:${right.id}`;
+        return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+      })
+      .map((candidate, index) => ({ ...candidate, rrfRank: index + 1 }));
   }
 
+  // 按标准 RRF 公式累计候选命中的各通道名次分数。
+  private calculateRrfScore(channelRanks: RetrievalCandidate["channelRanks"]): number {
+    return Object.values(channelRanks).reduce(
+      (score, rank) => score + 1 / (RRF_K + rank),
+      0,
+    );
+  }
+
+  // 按 RRF 排名依次生成上下文，并控制最终上下文的 Token 总量。
   private applyTokenBudget(candidates: RetrievalCandidate[]): RetrievalContextItem[] {
     const contexts: RetrievalContextItem[] = [];
     let usedTokens = 0;
@@ -526,10 +566,6 @@ export class RetrievalService {
     return Number(value.toFixed(6));
   }
 
-  private errorMessage(error: unknown): string {
-    return error instanceof Error ? error.message : String(error);
-  }
-
   // 在无查询或无授权知识库时返回结构完整的空召回结果。
   private emptyResult(
     query: string,
@@ -558,8 +594,15 @@ export class RetrievalService {
         merged: 0,
         reranked: 0,
         final: 0,
+        channelFailures: [],
       },
     };
+  }
+
+  // 将通道异常收敛为有限长度的错误信息，供运行追踪定位失败原因。
+  private errorMessage(error: unknown): string {
+    const message = error instanceof Error ? error.message : String(error);
+    return message.slice(0, 500);
   }
 
   // 规范化并去重检索查询，避免重复调用向量或全文召回。

@@ -56,7 +56,10 @@ import { AnalyticsEventService } from "../analytics/analytics-event.service.js";
 import type { AuthenticatedUser } from "../auth/auth.types.js";
 import { KnowledgeBaseAccessService } from "../knowledge-base/knowledge-base-access.service.js";
 import { KnowledgeImprovementService } from "../knowledge-base/knowledge-improvement.service.js";
-import { RetrievalService } from "../retrieval/retrieval.service.js";
+import {
+  RetrievalAllChannelsFailedError,
+  RetrievalService,
+} from "../retrieval/retrieval.service.js";
 import type { RetrievalContextItem } from "../retrieval/retrieval.types.js";
 import {
   buildKnowledgeScopeAnswer,
@@ -484,8 +487,10 @@ export class AgentService {
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : "Agent 步骤执行失败";
+      const retrieval =
+        error instanceof RetrievalAllChannelsFailedError ? error.result : state.retrieval;
+      await this.recordErroredTrace({ ...state, retrieval, error: message });
       await state.emit({ type: "agent.failed", message });
-      await this.recordErroredTrace({ ...state, error: message });
       throw error;
     }
   }
@@ -651,6 +656,7 @@ export class AgentService {
     return { ...state, retrieval };
   }
 
+  // 保留独立的重排上下文编排节点，等待后续接入模型重排。
   private rerankContext(state: AgentState): AgentState {
     return state;
   }

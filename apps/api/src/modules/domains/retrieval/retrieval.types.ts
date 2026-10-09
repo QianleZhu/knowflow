@@ -2,6 +2,11 @@ export type RetrievalChannel = "vector" | "fts" | "knowledge_item";
 
 export type RetrievalChannelRanks = Partial<Record<RetrievalChannel, number>>;
 
+export type RetrievalChannelFailure = {
+  channel: RetrievalChannel;
+  message: string;
+};
+
 export type RetrievalSourceType = "knowledge_document" | "knowledge_item";
 
 export type RetrievalCandidate = {
@@ -20,6 +25,8 @@ export type RetrievalCandidate = {
   pageOrSection: string | null;
   channels: RetrievalChannel[];
   channelRanks: RetrievalChannelRanks;
+  rrfScore: number;
+  rrfRank: number;
   initialScore: number;
   rerankScore: number | null;
   knowledgeItemVerified: boolean;
@@ -47,6 +54,7 @@ export type RetrievalTrace = {
   merged: number;
   reranked: number;
   final: number;
+  channelFailures: RetrievalChannelFailure[];
 };
 
 export type RetrievalResult = {
