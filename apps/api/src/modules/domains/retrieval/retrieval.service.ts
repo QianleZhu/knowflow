@@ -179,6 +179,7 @@ export class RetrievalService {
         merged: merged.length,
         rrfReturned: candidates.length,
         reranked: 0,
+        rerankFailure: null,
         final: 0,
         channelFailures,
       },
@@ -427,6 +428,7 @@ export class RetrievalService {
       rrfRank: 0,
       initialScore: row.score,
       rerankScore: null,
+      headingPath: this.normalizeHeadingPath(row.headingPath),
       knowledgeItemVerified: false,
       sourceExpired: false,
       tokenCount: this.estimateTokenCount(row.parentContent),
@@ -459,6 +461,7 @@ export class RetrievalService {
       rrfRank: 0,
       initialScore: row.score,
       rerankScore: null,
+      headingPath: null,
       knowledgeItemVerified: row.verifiedBy !== null,
       sourceExpired: row.status === "expired",
       tokenCount: this.estimateTokenCount(row.content),
@@ -477,16 +480,22 @@ export class RetrievalService {
       }
 
       const channels = new Set([...existing.channels, ...candidate.channels]);
+      // 命中同一父块时，标题路径、子块正文和 child ID 必须来自同一个最高分子块。
+      const candidateHasHigherScore = candidate.initialScore > existing.initialScore;
       byKey.set(key, {
         ...existing,
         channels: [...channels],
         channelRanks: { ...existing.channelRanks, ...candidate.channelRanks },
         initialScore: Math.max(existing.initialScore, candidate.initialScore),
-        childChunkId: existing.childChunkId ?? candidate.childChunkId,
-        content:
-          candidate.initialScore > existing.initialScore ? candidate.content : existing.content,
-        snippet:
-          candidate.initialScore > existing.initialScore ? candidate.snippet : existing.snippet,
+        ...(candidateHasHigherScore
+          ? {
+              childChunkId: candidate.childChunkId,
+              content: candidate.content,
+              headingPath: candidate.headingPath,
+              pageOrSection: candidate.pageOrSection,
+              snippet: candidate.snippet,
+            }
+          : {}),
       });
     }
 
@@ -510,10 +519,7 @@ export class RetrievalService {
 
   // 按标准 RRF 公式累计候选命中的各通道名次分数。
   private calculateRrfScore(channelRanks: RetrievalCandidate["channelRanks"]): number {
-    return Object.values(channelRanks).reduce(
-      (score, rank) => score + 1 / (RRF_K + rank),
-      0,
-    );
+    return Object.values(channelRanks).reduce((score, rank) => score + 1 / (RRF_K + rank), 0);
   }
 
   private normalizeHeadingPath(value: unknown): string[] | null {
@@ -569,6 +575,7 @@ export class RetrievalService {
         merged: 0,
         rrfReturned: 0,
         reranked: 0,
+        rerankFailure: null,
         final: 0,
         channelFailures: [],
       },

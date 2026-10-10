@@ -20,7 +20,7 @@ void describe("AliyunLlmClient", () => {
       );
     const client = new AliyunLlmClient(() =>
       Promise.resolve({
-        model: "gte-rerank",
+        model: "qwen3-rerank",
         temperature: 0,
         maxOutputTokens: null,
         timeoutMs: 1000,
@@ -30,14 +30,11 @@ void describe("AliyunLlmClient", () => {
       }),
     );
 
-    await assert.rejects(
-      client.rerank("question", ["doc"], 1),
-      (error: unknown) => {
-        assert.ok(error instanceof Error);
-        assert.equal(error.message, "Model provider request failed");
-        return true;
-      },
-    );
+    await assert.rejects(client.rerank("question", ["doc"], 1), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(error.message, "Model provider request failed");
+      return true;
+    });
   });
 
   void it("keeps provider response bodies out of API error responses", async () => {
@@ -49,7 +46,7 @@ void describe("AliyunLlmClient", () => {
       );
     const client = new AliyunLlmClient(() =>
       Promise.resolve({
-        model: "gte-rerank",
+        model: "qwen3-rerank",
         temperature: 0,
         maxOutputTokens: null,
         timeoutMs: 1000,

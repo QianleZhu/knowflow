@@ -122,7 +122,7 @@ PDF/DOCX/MD 需要启动独立 Docling 薄适配服务（见 services/docling/RE
 
 ### 设计意图
 
-单一检索方式各有盲区：向量召回擅长语义但弱于精确关键词，全文检索擅长术语但不懂同义改写，已发布的知识条目是人工沉淀的高质量答案。因此并行跑三路召回，合并去重后用真实 Rerank 模型精排，再做父子扩展与 Token 预算，最终给出带引用、可信度分级的上下文。权限过滤在召回前置——无权限的知识库根本不进 SQL。
+单一检索方式各有盲区：向量召回擅长语义但弱于精确关键词，全文检索擅长术语但不懂同义改写，已发布的知识条目是人工沉淀的高质量答案。因此并行跑三路召回，合并去重后用 Qwen3 Rerank 精排，再将父块完整内容作为最终上下文，提供引用和可信度分级。权限过滤在召回前置——无权限的知识库根本不进 SQL。
 
 ### 实现要点
 
@@ -130,7 +130,7 @@ PDF/DOCX/MD 需要启动独立 Docling 薄适配服务（见 services/docling/RE
 
 ```
 归一化/去重查询 → 嵌入首条查询 → 三路并行召回(Promise.all)
-→ 路内去重排名 → RRF 融合并返回 Top 50 → rerank_context（当前透传占位，待实现重排与 Token Budget）
+→ 路内去重排名 → RRF 融合并返回 Top 50 → Qwen3 Rerank（子块标题路径 + 子块内容）→ Top 10 父块上下文
 ```
 
 allowedKnowledgeBaseIds 为空时直接短路返回空结果，不触任何 DB。
@@ -143,14 +143,13 @@ allowedKnowledgeBaseIds 为空时直接短路返回空结果，不触任何 DB�
 
 **RRF 融合**（`mergeCandidates`）：文档候选按 `parentChunkId` 归并，知识条目按条目 ID 归并；合并各通道名次计算 RRF 分数，稳定排序后最多返回 Top 50。单次查询最多有 40 个向量父块、20 个 FTS 父块和 20 个知识条目候选，跨路去重后再截断。
 
-**Rerank 与 Token 预算**
+**Qwen3 Rerank**
 
-- 当前 `rerank_context` 只透传 RRF Top 50 候选；模型 Rerank 尚未接入。
-- Token Budget 从检索节点移除，后续在 Rerank 选定最终上下文后执行。
+- `rerank_context` 将原始查询和最多 50 条 RRF 候选提交给 `qwen3-rerank`。文档输入由文档标题、子块标题路径和命中的子块内容组成；知识条目输入由条目标题和内容组成。
+- 按模型返回的候选索引映射回检索元数据，按相关性选出 Top 10。最终文档上下文使用父块全文，引用仍指向命中的子块。
+- 模型调用失败或返回不完整结果时，按 RRF 排名取前 10 条继续构造提示词，并在检索追踪中记录兜底原因。
 
-**父子扩展**（`:603-628`、`:971-973`）：子块命中后 `contextText` 返回 `parentContent ?? content`——即把精确命中的子块扩展为父块完整内容，既喂给 Rerank 也作为最终上下文，兼顾命中精度与上下文完整。
-
-**Token 预算**（`applyTokenBudget` `:826-845`）：`MAX_CONTEXT_TOKENS = 6000`，逐条累加估算 token（length/4），超预算则跳过（至少保留首条），并赋 `citationIndex`。
+**父子扩展**：重排判断使用子块标题路径和命中的子块内容；最终 `contextText` 使用 `parentContent ?? content`，引用仍定位到命中的子块，兼顾排序精度与上下文完整。
 
 **权限前置**：每条召回 SQL 的 `WHERE` 都带 `inArray(knowledgeBaseId, allowedKnowledgeBaseIds)`，授权范围由 Agent 的 `resolve_knowledge_scope` 节点算出（见支柱三），无权限 KB 从不被查询——杜绝越权内容进入候选/上下文/引用。
 
@@ -174,7 +173,7 @@ allowedKnowledgeBaseIds 为空时直接短路返回空结果，不触任何 DB�
 | 4   | `analyze_query`                  | 关键词切分生成 rewrittenQueries（无 LLM）                                             |
 | 5   | `parse_conversation_attachments` | **加载对话记忆**（近期消息 + 摘要，见支柱四）                                         |
 | 6   | `retrieve_knowledge`             | 调检索服务（知识范围类问题短路跳过）                                                  |
-| 7   | `rerank_context`                 | 接收 RRF 排名前 50 的候选；当前透传占位，待实现模型重排与 Token Budget                |
+| 7   | `rerank_context`                 | 使用 Qwen3 Rerank 评估 RRF Top 50，返回 Top 10 父块上下文；失败时回退到 RRF Top 10    |
 | 8   | `build_prompt`                   | 拼 system prompt（含反注入声明 + 可访问 KB + 上下文）                                 |
 | 9   | `generate_answer_stream`         | 流式调 LLM 生成答案                                                                   |
 | 10  | `attach_citations`               | 上下文映射为引用来源                                                                  |
@@ -189,7 +188,7 @@ allowedKnowledgeBaseIds 为空时直接短路返回空结果，不触任何 DB�
 4. **analyze_query**（`:456-467`）：关键词切分，生成 `rewrittenQueries = [原query, 关键词拼接]`，纯字符串处理无 LLM。
 5. **parse_conversation_attachments**（`:469-499`）：加载对话记忆——最近 6 条原文（排除本轮 user 消息）+ 滚动摘要写入 state（见支柱四）。
 6. **retrieve_knowledge**（`:501-520`）：若是「我有哪些知识库」这类元问题（`isKnowledgeScopeQuestion`）直接短路、`retrieval=null`；否则调检索服务（支柱二），发 `agent.retrieval.completed`。
-7. **rerank_context**：当前纯透传，收到检索结果中的 RRF Top 50 候选；后续在此实现模型重排和最终上下文预算。
+7. **rerank_context**：用 Qwen3 Rerank 对最多 50 条候选排序，生成 Top 10 上下文；失败时按 RRF 前 10 条兜底，并记录追踪。
 8. **build_prompt**（`:526-542`）：拼 system prompt——Agent 自身 systemPrompt + 反注入声明 + 可访问 KB 的 JSON + 检索到的授权上下文（带 `[n]` 引用标号）。
 9. **generate_answer_stream**（`:544-610`）：分级兜底后流式生成（详见下）。
 10. **attach_citations**（`:612-621`）：把命中的上下文映射成引用来源（`noAnswerType` 非空则空引用）。
@@ -198,7 +197,7 @@ allowedKnowledgeBaseIds 为空时直接短路返回空结果，不触任何 DB�
 
 **全程可观测**（`runStep` `:377-405`）：每个节点都包一层，进出各发 `agent.step.started/completed` SSE、记录 `{name,status,at}`；抛错则发 `agent.failed` 并写错误 trace。`record_trace` 落的 `agentRuntimeTraces` 含：图版本、状态快照、各步骤耗时、检索上下文、prompt 快照（截断 12000）、模型配置、置信度、延迟——一次问答可完整回放。
 
-**节点性质**：真正异步（DB/LLM I/O）的是 1/2/3/5/6/9/10/12；`analyze_query`、`rerank_context`（纯透传）、`build_prompt`、`calculate_confidence` 无 I/O。
+**节点性质**：真正异步（DB/LLM I/O）的是 1/2/3/5/6/7/9/10/12；`analyze_query`、`build_prompt`、`calculate_confidence` 无 I/O。
 
 **流式生成的分级兜底**（`generate_answer_stream` `:544-610`，按序判断）：
 
@@ -308,7 +307,7 @@ allowedKnowledgeBaseIds 为空时直接短路返回空结果，不触任何 DB�
 
 **模型用途映射 + 热切换**（`model-usage-client.ts` + seed `:451-481`）：模型按「用途」（usageType）解耦——`chat` / `query_understanding` / `embedding` / `rerank` / `knowledge_production` / `agent_generation` 等各映射到一个供应商+模型，运行时从 DB 表 `modelUsagePolicies` 解析（含 default→fallback 顺序），改配置无需重启。API Key 加密存储（`encryptApiKey`），DB 不存明文。
 
-> seed 预置阿里云百炼：`qwen-plus`（chat / 知识生产 / agent 生成）、`qwen-turbo`（query_understanding）、`text-embedding-v4`（embedding）、`gte-rerank-v2`（rerank）。图片 OCR 用途（`ocr`）未在 seed 预置，需在模型配置后台另配，否则图片解析会提示配置。
+> seed 预置阿里云百炼：`qwen-plus`（chat / 知识生产 / agent 生成）、`qwen-turbo`（query_understanding）、`text-embedding-v4`（embedding）、`qwen3-rerank`（rerank）。图片 OCR 用途（`ocr`）未在 seed 预置，需在模型配置后台另配，否则图片解析会提示配置。
 
 **向量空间统一**（`EXPECTED_EMBEDDING_DIMENSION = 1024`，`aliyun-llm.ts:10`）：所有嵌入强校验 1024 维（写入子块、发布知识条目、嵌入查询三处都校验），pgvector 统一 `vector(1024)` 列，保证同库可比。维度不符直接抛错，杜绝脏向量入库。
 

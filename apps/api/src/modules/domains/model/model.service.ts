@@ -32,6 +32,7 @@ import type {
 import { and, asc, count, eq, or } from "drizzle-orm";
 import OpenAI from "openai";
 
+import { buildAliyunRerankUrl } from "../../../shared/llm/aliyun-llm.js";
 import type { AuthenticatedUser } from "../auth/auth.types.js";
 
 type ModelProviderRow = typeof modelProviders.$inferSelect;
@@ -468,8 +469,7 @@ export class ModelService {
     apiKey: string,
     signal: AbortSignal,
   ): Promise<void> {
-    const base = provider.baseUrl.replace(/\/compatible-mode\/v1\/?$/, "");
-    const response = await fetch(`${base}/api/v1/services/rerank/text-rerank/text-rerank`, {
+    const response = await fetch(buildAliyunRerankUrl(provider.baseUrl), {
       method: "POST",
       headers: {
         Authorization: `Bearer ${apiKey}`,
@@ -477,8 +477,9 @@ export class ModelService {
       },
       body: JSON.stringify({
         model: model.modelName,
-        input: { query: "health check", documents: ["health check"] },
-        parameters: { return_documents: false, top_n: 1 },
+        query: "health check",
+        documents: ["health check"],
+        top_n: 1,
       }),
       signal,
     });

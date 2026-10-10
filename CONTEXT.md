@@ -9,7 +9,7 @@
 **执行顺序固定为 P0 → P1 → P2,主链路优先、增量扩展**。任何时刻 P0 主链路必须端到端可演示,不允许为做 P1/P2 而让主链路处于跑不通的状态。
 
 - **P0(核心主链路,必须端到端跑通且随时可演示)**
-  登录 → 建知识库 → 上传文档(PDF/Markdown/TXT)→ 解析/分段/向量化(父子分段)→ 知识库官方 Agent → 提问 → **检索(三路召回:向量 + FTS + 知识条目;路内排名 + RRF 融合 + 父子扩展 + Token Budget)** → 带引用的流式回答 → 点赞/点踩反馈。
+  登录 → 建知识库 → 上传文档(PDF/Markdown/TXT)→ 解析/分段/向量化(父子分段)→ 知识库官方 Agent → 提问 → **检索(三路召回:向量 + FTS + 知识条目;路内排名 + RRF Top 50 + Qwen3 Rerank Top 10 + 父块上下文)** → 带引用的流式回答 → 点赞/点踩反馈。
   P0 同时包含:**模型多供应商管理后台 UI**、**知识条目(KnowledgeItem)完整功能**(创建/编辑/发布/下架 + 状态机 + 审核流 + 向量化 + 纳入召回)、完整三层权限。
 
 - **P1(主链路打通后扩展)**
@@ -76,9 +76,8 @@ P0 的检索做到接近完整的 9 环节,对应 LangGraph 的 `analyze_query` 
 - **合并去重**:多通道命中合并,按 parent chunk 去重,记录每条结果来自哪些通道。
 - **RRF 融合**:按向量、全文和知识条目通道名次计算总分与总排名,最多将前 50 条传给 `rerank_context`。
 - **召回容错**:三路分别收集并记录失败通道;部分成功时继续融合,全部失败时终止 Agent 链路并保存失败追踪。
-- **Rerank(`rerank_context`)**:节点已预留,当前将检索节点的 RRF 排名透传;模型重排后续接入。
+- **Rerank(`rerank_context`)**:使用 `qwen3-rerank` 对最多 50 条 RRF 候选重排;文档候选包含子块标题路径和子块内容,最终保留 Top 10 作为构造提示词节点的原料。模型失败时回退到 RRF 前 10 条并记录追踪。
 - **父子分段扩展**:child 命中 → 扩展 parent chunk 作为上下文,引用仍定位到 child / 原文位置。
-- **Token Budget**:`rerank_context` 确定最终上下文后再控制 token 数与单文档占比,优先保留高分 / 已验证内容。
 
 **Why:** 用户希望 P0 尽量完整,不留到后面补。三路召回 + 真 Rerank + 父子分段让 P0 的 RAG 深度达到企业级,是「AI 运用 35%」的核心展示点。
 **How to apply:** LangGraph 12 节点全部真实实现(P0 不留空壳节点);唯意图识别 / 元数据条件识别等查询理解子能力可 P1 增强。
@@ -109,7 +108,7 @@ P0 的检索做到接近完整的 9 环节,对应 LangGraph 的 `analyze_query` 
 | 对话生成                             | generate_answer_stream | `qwen-plus`(流式)         |
 | 查询理解                             | analyze_query          | `qwen-turbo`              |
 | Embedding                            | retrieve_knowledge     | `text-embedding-v4`(1024) |
-| Rerank                               | rerank_context         | `gte-rerank-v2`           |
+| Rerank                               | rerank_context         | `qwen3-rerank`            |
 | 文档处理(摘要/关键词/可能问题)       | Worker 异步            | `qwen-plus`               |
 | Agent 生成 / 知识生产 / 思维导图生成 | P1 已实现              | `qwen-plus`               |
 

@@ -2,10 +2,7 @@ import { Injectable } from "@nestjs/common";
 import type { ModelUsageType } from "@knowflow/shared";
 import OpenAI from "openai";
 
-import {
-  resolveModelConfig,
-  type ResolvedModelConfig,
-} from "./model-usage-client.js";
+import { resolveModelConfig, type ResolvedModelConfig } from "./model-usage-client.js";
 
 export const EXPECTED_EMBEDDING_DIMENSION = 1024;
 
@@ -27,13 +24,11 @@ export type RerankResult = {
   relevanceScore: number;
 };
 
-type DashScopeRerankResponse = {
-  output?: {
-    results?: {
-      index?: number;
-      relevance_score?: number;
-    }[];
-  };
+type Qwen3RerankResponse = {
+  results?: {
+    index?: number;
+    relevance_score?: number;
+  }[];
 };
 
 export type ChatStreamChunk = {
@@ -46,8 +41,14 @@ export class AliyunLlmService {
     return createAliyunLlmClient().embedTexts(texts, model);
   }
 
-  async rerank(query: string, documents: string[], topN: number, model?: string): Promise<RerankResult[]> {
-    return createAliyunLlmClient().rerank(query, documents, topN, model);
+  async rerank(
+    query: string,
+    documents: string[],
+    topN: number,
+    model?: string,
+    instruct?: string,
+  ): Promise<RerankResult[]> {
+    return createAliyunLlmClient().rerank(query, documents, topN, model, instruct);
   }
 
   streamChat(input: {
@@ -111,49 +112,87 @@ export class AliyunLlmClient {
     });
   }
 
-  async rerank(query: string, documents: string[], topN: number, model?: string): Promise<RerankResult[]> {
+  async rerank(
+    query: string,
+    documents: string[],
+    topN: number,
+    model?: string,
+    instruct?: string,
+  ): Promise<RerankResult[]> {
     if (documents.length === 0) {
       return [];
     }
 
     const config = await this.resolveModelConfig("rerank");
-    const response = await fetch(process.env["ALIYUN_RERANK_URL"] ?? this.rerankUrl(config), {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${config.apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: model ?? config.model,
-        input: {
-          query,
-          documents,
-        },
-        parameters: {
-          return_documents: false,
-          top_n: Math.min(topN, documents.length),
-        },
-      }),
-    });
+    const requestUrl = process.env["ALIYUN_RERANK_URL"] ?? buildAliyunRerankUrl(config.baseUrl);
+    const maxAttempts = Math.max(1, config.retryCount + 1);
 
-    if (!response.ok) {
-      throw new Error("Model provider request failed");
+    // 按供应商配置执行有限重试，并只对限流、服务端错误和网络异常重试。
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      let response: Response;
+      try {
+        response = await fetch(requestUrl, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${config.apiKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: model ?? config.model,
+            query,
+            documents,
+            top_n: Math.min(topN, documents.length),
+            ...(instruct === undefined ? {} : { instruct }),
+          }),
+          signal: AbortSignal.timeout(config.timeoutMs),
+        });
+      } catch {
+        if (attempt === maxAttempts) {
+          throw new Error("Model provider request failed");
+        }
+        continue;
+      }
+
+      if (!response.ok) {
+        if ((response.status === 429 || response.status >= 500) && attempt < maxAttempts) {
+          continue;
+        }
+        throw new Error("Model provider request failed");
+      }
+
+      const body = (await response.json()) as Qwen3RerankResponse;
+      const results = body.results;
+      if (!Array.isArray(results)) {
+        throw new Error("Aliyun rerank response is invalid");
+      }
+      // LLM输出格式校验防重复
+      const seenIndexes = new Set<number>();
+      const normalizedResults = results.map((item) => {
+        const index = item.index;
+        const relevanceScore = item.relevance_score;
+        if (
+          typeof index !== "number" ||
+          !Number.isInteger(index) ||
+          index < 0 ||
+          index >= documents.length ||
+          seenIndexes.has(index) ||
+          typeof relevanceScore !== "number" ||
+          !Number.isFinite(relevanceScore) ||
+          relevanceScore < 0 ||
+          relevanceScore > 1
+        ) {
+          throw new Error("Aliyun rerank response is invalid");
+        }
+        seenIndexes.add(index);
+        return { index, relevanceScore };
+      });
+
+      return normalizedResults
+        .sort((left, right) => right.relevanceScore - left.relevanceScore)
+        .slice(0, Math.min(topN, documents.length));
     }
 
-    const body = (await response.json()) as DashScopeRerankResponse;
-    const results = body.output?.results;
-    if (!Array.isArray(results)) {
-      throw new Error("Aliyun rerank response is invalid");
-    }
-
-    return results
-      .map((item) => ({
-        index: typeof item.index === "number" ? item.index : -1,
-        relevanceScore:
-          typeof item.relevance_score === "number" ? item.relevance_score : 0,
-      }))
-      .filter((item) => item.index >= 0 && item.index < documents.length)
-      .sort((left, right) => right.relevanceScore - left.relevanceScore);
+    throw new Error("Model provider request failed");
   }
 
   async *streamChat(input: {
@@ -226,8 +265,15 @@ export class AliyunLlmClient {
       maxRetries: config.retryCount,
     });
   }
+}
 
-  private rerankUrl(config: ResolvedModelConfig): string {
-    return `${config.baseUrl.replace(/\/compatible-mode\/v1\/?$/, "")}/api/v1/services/rerank/text-rerank/text-rerank`;
+// 统一生成阿里云 Qwen3 Rerank 兼容接口地址，兼容模型配置中的默认 Base URL。
+export function buildAliyunRerankUrl(baseUrl: string): string {
+  const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
+  if (normalizedBaseUrl.endsWith("/compatible-api/v1")) {
+    return `${normalizedBaseUrl}/reranks`;
   }
+
+  const endpointBaseUrl = normalizedBaseUrl.replace(/\/compatible-mode\/v1$/, "");
+  return `${endpointBaseUrl}/compatible-api/v1/reranks`;
 }

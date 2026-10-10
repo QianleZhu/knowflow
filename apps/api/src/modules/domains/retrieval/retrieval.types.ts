@@ -19,6 +19,7 @@ export type RetrievalCandidate = {
   childChunkId: string | null;
   parentChunkId: string | null;
   title: string;
+  headingPath: string[] | null;
   content: string;
   parentContent: string | null;
   snippet: string;
@@ -54,6 +55,7 @@ export type RetrievalTrace = {
   merged: number;
   rrfReturned: number;
   reranked: number;
+  rerankFailure: string | null;
   final: number;
   channelFailures: RetrievalChannelFailure[];
 };
@@ -66,4 +68,3 @@ export type RetrievalResult = {
   contexts: RetrievalContextItem[];
   trace: RetrievalTrace;
 };
-

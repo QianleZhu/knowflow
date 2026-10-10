@@ -60,7 +60,11 @@ import {
   RetrievalAllChannelsFailedError,
   RetrievalService,
 } from "../retrieval/retrieval.service.js";
-import type { RetrievalContextItem } from "../retrieval/retrieval.types.js";
+import type {
+  RetrievalCandidate,
+  RetrievalContextItem,
+  RetrievalResult,
+} from "../retrieval/retrieval.types.js";
 import {
   buildKnowledgeScopeAnswer,
   formatAccessibleKnowledgeBasesForPrompt,
@@ -84,8 +88,11 @@ import type { AgentState, RuntimeAgent, SseEmitter } from "./agent.types.js";
 import { QueryRewriteService } from "./query-rewrite.service.js";
 import { QueryUnderstandingService } from "./query-understanding.service.js";
 
-const GRAPH_VERSION = "query-router-chat-v2";
+const GRAPH_VERSION = "query-router-chat-v3";
 const MIN_CONTEXT_RERANK_SCORE = 0.05;
+// RRF 最多向 Qwen3 Rerank 提交 50 个候选，最终只保留 Top 10 上下文。
+const RERANK_CONTEXT_TOP_N = 10;
+const RERANK_INSTRUCTION = "请按候选内容对查询的相关性排序，优先选择能直接支持回答查询的内容。";
 const DEFAULT_CONVERSATION_TITLE = "新对话";
 const FALLBACK_ANSWER =
   "我没有在你有权限访问的知识中找到可靠依据，因此无法给出确定答案。你可以换一种问法，或联系知识库管理员补充相关资料。";
@@ -649,16 +656,116 @@ export class AgentService {
           )
         : state.knowledgeScope,
     });
-    await state.emit({
-      type: "agent.retrieval.completed",
-      contextCount: retrieval.contexts.length,
-    });
     return { ...state, retrieval };
   }
 
-  // 保留独立的重排上下文编排节点，等待后续接入模型重排。
-  private rerankContext(state: AgentState): AgentState {
-    return state;
+  // 用子块标题路径和内容重排 RRF 候选，并生成供提示词构造节点使用的 Top 10 上下文。
+  private async rerankContext(state: AgentState): Promise<AgentState> {
+    const retrieval = state.retrieval;
+    if (retrieval === null) {
+      return state;
+    }
+
+    if (retrieval.candidates.length === 0) {
+      await state.emit({ type: "agent.retrieval.completed", contextCount: 0 });
+      return { ...state, retrieval: this.withRerankedContexts(retrieval, [], false, null) };
+    }
+
+    const documents = retrieval.candidates.map((candidate) => this.toRerankDocument(candidate));
+    let contexts: RetrievalContextItem[];
+    let rerankSucceeded = false;
+    let rerankFailure: string | null = null;
+    try {
+      const ranked = await this.llm.rerank(
+        retrieval.query,
+        documents,
+        RERANK_CONTEXT_TOP_N,
+        undefined,
+        RERANK_INSTRUCTION,
+      );
+      const expectedCount = Math.min(RERANK_CONTEXT_TOP_N, retrieval.candidates.length);
+      if (
+        ranked.length !== expectedCount ||
+        new Set(ranked.map((item) => item.index)).size !== ranked.length
+      ) {
+        throw new Error("Qwen3-Rerank 返回结果不完整");
+      }
+
+      contexts = ranked.map(({ index, relevanceScore }, rank) => {
+        const candidate = retrieval.candidates[index];
+        if (candidate === undefined) {
+          throw new Error("Qwen3-Rerank 返回了无效候选索引");
+        }
+        return this.toRetrievalContext(candidate, rank + 1, relevanceScore);
+      });
+      rerankSucceeded = true;
+    } catch {
+      // 模型不可用或返回无效排名时，保留 RRF 前十条，让问答链路继续执行。
+      contexts = retrieval.candidates
+        .slice(0, RERANK_CONTEXT_TOP_N)
+        .map((candidate, index) => this.toRetrievalContext(candidate, index + 1, null));
+      rerankFailure = "Qwen3-Rerank 调用失败或结果无效，已回退至 RRF Top 10";
+    }
+
+    const updatedRetrieval = this.withRerankedContexts(
+      retrieval,
+      contexts,
+      rerankSucceeded,
+      rerankFailure,
+    );
+    await state.emit({
+      type: "agent.retrieval.completed",
+      contextCount: updatedRetrieval.contexts.length,
+    });
+    return { ...state, retrieval: updatedRetrieval };
+  }
+
+  // 按模型输入格式拼装文档标题、子块标题路径和子块正文。
+  private toRerankDocument(candidate: RetrievalCandidate): string {
+    if (candidate.sourceType === "knowledge_item") {
+      return `知识条目标题：${candidate.title}\n内容：${candidate.content}`;
+    }
+
+    const headingPath = candidate.headingPath?.join(" > ");
+    const normalizedHeadingPath =
+      headingPath === undefined || headingPath.length === 0 ? "未提供" : headingPath;
+    return `文档标题：${candidate.title}\n子块标题路径：${normalizedHeadingPath}\n子块内容：${candidate.content}`;
+  }
+
+  // 将重排结果转成最终上下文，并用父块完整内容供答案生成使用。
+  private toRetrievalContext(
+    candidate: RetrievalCandidate,
+    rank: number,
+    rerankScore: number | null,
+  ): RetrievalContextItem {
+    return {
+      ...candidate,
+      rerankScore,
+      contextText:
+        candidate.sourceType === "knowledge_document"
+          ? (candidate.parentContent ?? candidate.content)
+          : candidate.content,
+      citationIndex: rank,
+    };
+  }
+
+  // 更新追踪中的重排结果数量、最终上下文数量和失败兜底原因。
+  private withRerankedContexts(
+    retrieval: RetrievalResult,
+    contexts: RetrievalContextItem[],
+    rerankSucceeded: boolean,
+    rerankFailure: string | null,
+  ): RetrievalResult {
+    return {
+      ...retrieval,
+      contexts,
+      trace: {
+        ...retrieval.trace,
+        reranked: rerankSucceeded ? contexts.length : 0,
+        rerankFailure,
+        final: contexts.length,
+      },
+    };
   }
 
   private buildPrompt(state: AgentState): AgentState {

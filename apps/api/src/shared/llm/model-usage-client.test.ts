@@ -144,7 +144,7 @@ void describe("resolveModelConfigFromSources", () => {
       resolveCatalogModel(modelId) {
         requestedModelIds.push(modelId);
         return Promise.resolve({
-          model: "gte-rerank",
+          model: "qwen3-rerank",
           baseUrl: "https://dashscope.example/compatible-mode/v1",
           encryptedApiKey: "encrypted-key",
         });

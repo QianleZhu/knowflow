@@ -452,7 +452,7 @@ async function runSeed(): Promise<void> {
   const qwenPlus = await ensureModel(providerId, "qwen-plus", "chat");
   const qwenTurbo = await ensureModel(providerId, "qwen-turbo", "chat");
   const embedding = await ensureModel(providerId, "text-embedding-v4", "embedding");
-  const rerank = await ensureModel(providerId, "gte-rerank-v2", "rerank");
+  const rerank = await ensureModel(providerId, "qwen3-rerank", "rerank");
 
   await Promise.all([
     ensureUsagePolicy({ usageType: "chat", modelId: qwenPlus.id, maxOutputTokens: 4096 }),
