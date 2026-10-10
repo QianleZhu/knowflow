@@ -894,6 +894,7 @@ function makeGenerationState(
         recalled: { vector: 0, fts: 0, knowledgeItem: 0 },
         ranked: { vector: 0, fts: 0, knowledgeItem: 0 },
         merged: 0,
+        rrfReturned: 0,
         reranked: 0,
         final: retrievalContexts.length,
         channelFailures: [],

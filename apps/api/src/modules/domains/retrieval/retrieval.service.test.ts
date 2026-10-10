@@ -97,16 +97,12 @@ void describe("RetrievalService.retrieve", () => {
     );
     assert.equal(result.candidates[0]?.rrfScore, 1 / 61);
     assert.equal(result.candidates[2]?.rrfScore, 1 / 62);
-    assert.equal(result.contexts.length, 3);
-    assert.deepEqual(
-      result.contexts.map((context) => context.citationIndex),
-      [1, 2, 3],
-    );
+    assert.deepEqual(result.contexts, []);
     assert.equal(result.candidates[0].rerankScore, null);
     assert.equal(result.trace.recalled.vector, 2);
     assert.equal(result.trace.recalled.knowledgeItem, 1);
     assert.equal(result.trace.reranked, 0);
-    assert.equal(result.trace.final, 3);
+    assert.equal(result.trace.final, 0);
   });
 });
 

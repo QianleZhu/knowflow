@@ -74,11 +74,11 @@ P0 的检索做到接近完整的 9 环节,对应 LangGraph 的 `analyze_query` 
 - **查询理解(`analyze_query`)**:P0 做关键词提取 + 轻量查询改写(1 条);意图识别、元数据条件识别留 P1。原始 query 始终参与检索。
 - **三路召回(`retrieve_knowledge`)**:向量召回(pgvector)+ 关键词召回(PostgreSQL FTS)+ 知识条目召回(已发布 KnowledgeItem 的向量)。全部前置权限过滤。
 - **合并去重**:多通道命中合并,按 parent chunk 去重,记录每条结果来自哪些通道。
-- **RRF 融合**:按向量、全文和知识条目通道名次计算总分与总排名,并传给 `rerank_context`。
+- **RRF 融合**:按向量、全文和知识条目通道名次计算总分与总排名,最多将前 50 条传给 `rerank_context`。
 - **召回容错**:三路分别收集并记录失败通道;部分成功时继续融合,全部失败时终止 Agent 链路并保存失败追踪。
 - **Rerank(`rerank_context`)**:节点已预留,当前将检索节点的 RRF 排名透传;模型重排后续接入。
 - **父子分段扩展**:child 命中 → 扩展 parent chunk 作为上下文,引用仍定位到 child / 原文位置。
-- **Token Budget**:控制最终上下文 token 数与单文档占比,优先保留高分 / 已验证内容。
+- **Token Budget**:`rerank_context` 确定最终上下文后再控制 token 数与单文档占比,优先保留高分 / 已验证内容。
 
 **Why:** 用户希望 P0 尽量完整,不留到后面补。三路召回 + 真 Rerank + 父子分段让 P0 的 RAG 深度达到企业级,是「AI 运用 35%」的核心展示点。
 **How to apply:** LangGraph 12 节点全部真实实现(P0 不留空壳节点);唯意图识别 / 元数据条件识别等查询理解子能力可 P1 增强。

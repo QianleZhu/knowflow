@@ -52,6 +52,7 @@ export type RetrievalTrace = {
     knowledgeItem: number;
   };
   merged: number;
+  rrfReturned: number;
   reranked: number;
   final: number;
   channelFailures: RetrievalChannelFailure[];

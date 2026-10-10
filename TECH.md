@@ -130,23 +130,23 @@ PDF/DOCX/MD 需要启动独立 Docling 薄适配服务（见 services/docling/RE
 
 ```
 归一化/去重查询 → 嵌入首条查询 → 三路并行召回(Promise.all)
-→ 合并去重 → Rerank(失败兜底初排) → Token 预算 → 返回 contexts + trace
+→ 路内去重排名 → RRF 融合并返回 Top 50 → rerank_context（当前透传占位，待实现重排与 Token Budget）
 ```
 
 allowedKnowledgeBaseIds 为空时直接短路返回空结果，不触任何 DB。
 
 **三路召回**（并行，`:122-134`）
 
-- **向量**（`recallVector` `:359-394`）：pgvector 余弦 `1 - (embedding <=> query)`，过滤激活 KB / 已完成文档 / 已嵌入子块，`LIMIT VECTOR_TOP_K = 20`。
+- **向量**（`recallVector`）：pgvector 余弦 `1 - (embedding <=> query)`，过滤激活 KB / 已完成文档 / 已嵌入子块；原句与最多一条改写各取 Top 20，跨查询按父块去重。
 - **全文 FTS**（`recallFts` `:397-427`）：PGroonga 全文检索 `content &@~ pgroonga_query_escape(query)`（TokenBigram 二元分词，中文子串可命中），分数 `pgroonga_score(tableoid, ctid)` 经 `s/(1+s)` 压缩到 (0,1) 与向量余弦对齐，`LIMIT FTS_TOP_K = 20`。`search_vector`/`tsvector('simple')` 已在迁移 `0018` 中废弃。
-- **知识条目**（`recallKnowledgeItems` `:428-458`）：对 `knowledgeItems.embedding` 余弦召回，仅取 `status="published"`，`LIMIT KNOWLEDGE_ITEM_TOP_K = 10`。
+- **知识条目**（`recallKnowledgeItems`）：对 `knowledgeItems.embedding` 余弦召回，仅取 `status="published"`；原句与最多一条改写各取 Top 10，再按条目去重。
 
-**合并去重**（`mergeCandidates` `:733-757`）：文档候选按 `parentChunkId` 归并（同一父块下多个子块命中折叠成一条），取通道并集、`initialScore` 取最大，按初排分降序。
+**RRF 融合**（`mergeCandidates`）：文档候选按 `parentChunkId` 归并，知识条目按条目 ID 归并；合并各通道名次计算 RRF 分数，稳定排序后最多返回 Top 50。单次查询最多有 40 个向量父块、20 个 FTS 父块和 20 个知识条目候选，跨路去重后再截断。
 
-**真实 Rerank**（`rerank` `:791-814` + `aliyun-llm.ts:114-157`）
+**Rerank 与 Token 预算**
 
-- 取合并后前 `RERANK_TOP_N = 30` 条，调阿里云百炼 **text-rerank API**（真 HTTP 调用，非占位），解析 `relevance_score`，过滤无分项后降序取 `RERANK_KEEP_N = 10`。
-- Rerank 失败 try/catch 兜底回初排，不让检索整体失败。
+- 当前 `rerank_context` 只透传 RRF Top 50 候选；模型 Rerank 尚未接入。
+- Token Budget 从检索节点移除，后续在 Rerank 选定最终上下文后执行。
 
 **父子扩展**（`:603-628`、`:971-973`）：子块命中后 `contextText` 返回 `parentContent ?? content`——即把精确命中的子块扩展为父块完整内容，既喂给 Rerank 也作为最终上下文，兼顾命中精度与上下文完整。
 
@@ -174,7 +174,7 @@ allowedKnowledgeBaseIds 为空时直接短路返回空结果，不触任何 DB�
 | 4   | `analyze_query`                  | 关键词切分生成 rewrittenQueries（无 LLM）                                             |
 | 5   | `parse_conversation_attachments` | **加载对话记忆**（近期消息 + 摘要，见支柱四）                                         |
 | 6   | `retrieve_knowledge`             | 调检索服务（知识范围类问题短路跳过）                                                  |
-| 7   | `rerank_context`                 | 占位节点（真 Rerank 在检索服务内完成）                                                |
+| 7   | `rerank_context`                 | 接收 RRF 排名前 50 的候选；当前透传占位，待实现模型重排与 Token Budget                |
 | 8   | `build_prompt`                   | 拼 system prompt（含反注入声明 + 可访问 KB + 上下文）                                 |
 | 9   | `generate_answer_stream`         | 流式调 LLM 生成答案                                                                   |
 | 10  | `attach_citations`               | 上下文映射为引用来源                                                                  |
@@ -189,7 +189,7 @@ allowedKnowledgeBaseIds 为空时直接短路返回空结果，不触任何 DB�
 4. **analyze_query**（`:456-467`）：关键词切分，生成 `rewrittenQueries = [原query, 关键词拼接]`，纯字符串处理无 LLM。
 5. **parse_conversation_attachments**（`:469-499`）：加载对话记忆——最近 6 条原文（排除本轮 user 消息）+ 滚动摘要写入 state（见支柱四）。
 6. **retrieve_knowledge**（`:501-520`）：若是「我有哪些知识库」这类元问题（`isKnowledgeScopeQuestion`）直接短路、`retrieval=null`；否则调检索服务（支柱二），发 `agent.retrieval.completed`。
-7. **rerank_context**（`:522-524`）：**纯透传占位**——真 Rerank 已在检索服务内完成，此节点保留为图的形状一致性。
+7. **rerank_context**：当前纯透传，收到检索结果中的 RRF Top 50 候选；后续在此实现模型重排和最终上下文预算。
 8. **build_prompt**（`:526-542`）：拼 system prompt——Agent 自身 systemPrompt + 反注入声明 + 可访问 KB 的 JSON + 检索到的授权上下文（带 `[n]` 引用标号）。
 9. **generate_answer_stream**（`:544-610`）：分级兜底后流式生成（详见下）。
 10. **attach_citations**（`:612-621`）：把命中的上下文映射成引用来源（`noAnswerType` 非空则空引用）。

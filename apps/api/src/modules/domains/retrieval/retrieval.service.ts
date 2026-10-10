@@ -14,7 +14,6 @@ import type {
   RetrievalCandidate,
   RetrievalChannel,
   RetrievalChannelFailure,
-  RetrievalContextItem,
   RetrievalResult,
 } from "./retrieval.types.js";
 
@@ -30,7 +29,8 @@ export class RetrievalAllChannelsFailedError extends Error {
 const VECTOR_TOP_K = 20;
 const FTS_TOP_K = 20;
 const KNOWLEDGE_ITEM_TOP_K = 10;
-const MAX_CONTEXT_TOKENS = 6000;
+// 将 RRF 排名前 50 的候选交给后续上下文重排节点。
+const RRF_CANDIDATE_TOP_N = 50;
 // 使用标准 RRF 平滑常数，避免靠后名次的贡献过低。
 const RRF_K = 60;
 
@@ -156,14 +156,14 @@ export class RetrievalService {
       ...ftsResult.candidates,
       ...knowledgeItemResult.candidates,
     ]);
-    const contexts = this.applyTokenBudget(merged);
+    const candidates = merged.slice(0, RRF_CANDIDATE_TOP_N);
 
     const result: RetrievalResult = {
       query: input.query,
       rewrittenQueries,
       expandedKeywords,
-      candidates: merged,
-      contexts,
+      candidates,
+      contexts: [],
       trace: {
         allowedKnowledgeBaseIds: input.allowedKnowledgeBaseIds,
         recalled: {
@@ -177,8 +177,9 @@ export class RetrievalService {
           knowledgeItem: knowledgeItemResult.candidates.length,
         },
         merged: merged.length,
+        rrfReturned: candidates.length,
         reranked: 0,
-        final: contexts.length,
+        final: 0,
         channelFailures,
       },
     };
@@ -515,38 +516,12 @@ export class RetrievalService {
     );
   }
 
-  // 按 RRF 排名依次生成上下文，并控制最终上下文的 Token 总量。
-  private applyTokenBudget(candidates: RetrievalCandidate[]): RetrievalContextItem[] {
-    const contexts: RetrievalContextItem[] = [];
-    let usedTokens = 0;
-    for (const candidate of candidates) {
-      const contextText = this.contextText(candidate);
-      const tokenCount = this.estimateTokenCount(contextText);
-      if (contexts.length > 0 && usedTokens + tokenCount > MAX_CONTEXT_TOKENS) {
-        continue;
-      }
-
-      usedTokens += tokenCount;
-      contexts.push({
-        ...candidate,
-        contextText,
-        tokenCount,
-        citationIndex: contexts.length + 1,
-      });
-    }
-    return contexts;
-  }
-
   private normalizeHeadingPath(value: unknown): string[] | null {
     if (!Array.isArray(value)) {
       return null;
     }
     const headingPath = value.filter((item): item is string => typeof item === "string");
     return headingPath.length === 0 ? null : headingPath;
-  }
-
-  private contextText(candidate: RetrievalCandidate): string {
-    return candidate.parentContent ?? candidate.content;
   }
 
   private snippet(content: string, maxLength: number): string {
@@ -592,6 +567,7 @@ export class RetrievalService {
           knowledgeItem: 0,
         },
         merged: 0,
+        rrfReturned: 0,
         reranked: 0,
         final: 0,
         channelFailures: [],
