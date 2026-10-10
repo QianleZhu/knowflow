@@ -870,10 +870,6 @@ export const askStreamEventSchema = z.discriminatedUnion("type", [
     delta: z.string(),
   }),
   z.object({
-    type: z.literal("agent.citations.ready"),
-    citations: z.array(citationSchema),
-  }),
-  z.object({
     type: z.literal("agent.completed"),
     message: conversationMessageSchema,
   }),

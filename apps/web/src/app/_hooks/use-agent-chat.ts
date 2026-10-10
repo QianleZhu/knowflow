@@ -194,9 +194,7 @@ export function useAgentChat({
         conversationId,
         role: "assistant",
         content: "",
-        confidenceLevel: null,
         noAnswerType: null,
-        citations: [],
         recommendedQuestions: [],
         createdAt: now,
       };
@@ -287,7 +285,6 @@ export function useAgentChat({
           rerank_context: "整理相关内容中",
           build_prompt: "组织上下文中",
           generate_answer_stream: "生成回答中",
-          attach_citations: "整理引用来源中",
         };
         setStatusText(stepLabels[event.step] ?? "处理中");
         break;
@@ -295,11 +292,6 @@ export function useAgentChat({
       case "agent.answer.delta":
         setMessages((current) =>
           current.map((m) => (m.id === draftId ? { ...m, content: `${m.content}${event.delta}` } : m)),
-        );
-        break;
-      case "agent.citations.ready":
-        setMessages((current) =>
-          current.map((m) => (m.id === draftId ? { ...m, citations: event.citations } : m)),
         );
         break;
       case "agent.completed":

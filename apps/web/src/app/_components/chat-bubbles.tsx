@@ -4,7 +4,6 @@ import {
   Compass,
   ShieldAlert,
   AlertCircle,
-  FileText,
   Bot,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
@@ -15,8 +14,6 @@ import rehypeHighlight from "rehype-highlight";
 import { type SyntheticEvent, useState } from "react";
 
 import {
-  type Citation,
-  type ConfidenceLevel,
   type ConversationMessage,
   type FeedbackRating,
   type NoAnswerType,
@@ -32,21 +29,12 @@ export type DraftAssistantMessage = {
   conversationId: string;
   role: "assistant";
   content: string;
-  confidenceLevel: ConfidenceLevel | null;
   noAnswerType: NoAnswerType | null;
-  citations: Citation[];
   recommendedQuestions: string[];
   createdAt: string;
 };
 
 export type DisplayMessage = ConversationMessage | DraftAssistantMessage;
-
-export const confidenceMeta: Record<ConfidenceLevel, { label: string; cls: string }> = {
-  strong: { label: "依据充分", cls: "bg-success-bg text-success" },
-  medium: { label: "依据一般", cls: "bg-info-bg text-info" },
-  weak: { label: "依据不足", cls: "bg-warning-bg text-warning" },
-  not_found: { label: "未找到依据", cls: "bg-neutral-100 text-ink-muted" },
-};
 
 export const noAnswerMeta: Record<
   NoAnswerType,
@@ -238,70 +226,6 @@ export function AssistantBubble({
               </ReactMarkdown>
             </div>
           )}
-
-          {/* 引用展示区 */}
-          {!showSkeleton && message.citations.length > 0 ? (
-            <div className="mt-5 rounded-xl border border-border/60 bg-neutral-50/50 p-4">
-              <div className="mb-3 flex items-center gap-1.5 text-xs font-semibold text-ink-muted">
-                <FileText className="size-3.5 text-ink-subtle" />
-                <span>参考来源</span>
-              </div>
-              <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
-                {(() => {
-                  // 后端 contexts 已按分数降序排列（retrieval.service.ts），直接取前 3 条
-                  return message.citations.slice(0, 3).map((citation, idx) => {
-                    const content = (
-                      <>
-                        <span className="line-clamp-1 block text-sm font-medium text-ink transition-colors group-hover:text-brand-700">
-                          [{idx + 1}] {citation.title}
-                        </span>
-                        {citation.knowledgeBaseName ? (
-                          <span className="mt-0.5 line-clamp-1 block text-xs text-ink-subtle">
-                            知识库: {citation.knowledgeBaseName}
-                          </span>
-                        ) : null}
-                      </>
-                    );
-                    
-                    if (citation.knowledgeBaseId !== null) {
-                      return (
-                        <a
-                          key={citation.id ?? idx}
-                          href={`/knowledge-bases/${citation.knowledgeBaseId}`}
-                          className="group flex flex-col gap-1 rounded-lg border border-border bg-surface p-3 shadow-sm transition-all hover:-translate-y-0.5 hover:border-brand-300 hover:bg-brand-50 hover:shadow-md"
-                        >
-                          {content}
-                        </a>
-                      );
-                    }
-                    return (
-                      <div
-                        key={citation.id ?? idx}
-                        className="flex flex-col gap-0.5 rounded-lg border border-border bg-neutral-50 p-2.5 shadow-xs"
-                      >
-                        {content}
-                        <span className="mt-0.5 text-xs text-ink-subtle">(该文档已被删除)</span>
-                      </div>
-                    );
-                  });
-                })()}
-              </div>
-            </div>
-          ) : null}
-
-          {/* 可信度 + 元信息 */}
-          {!message.id.startsWith("draft-") && message.confidenceLevel !== null ? (
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              <span
-                className={cn(
-                  "inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium",
-                  confidenceMeta[message.confidenceLevel].cls,
-                )}
-              >
-                {confidenceMeta[message.confidenceLevel].label}
-              </span>
-            </div>
-          ) : null}
 
           {/* 操作按钮 */}
           {!message.id.startsWith("draft-") ? (

@@ -318,7 +318,7 @@ async function ensureDefaultAgent(input: {
           createdBy: input.createdBy,
           publishedAt: new Date(),
           openingMessage: "你好，我可以基于当前知识库资料回答问题。",
-          systemPrompt: "你是企业知识库专家 Agent。必须基于授权知识回答，并展示引用来源。",
+          systemPrompt: "你是企业知识库专家 Agent。必须基于授权知识回答；没有可靠依据时明确说明，不得编造。",
         })
         .returning({ id: agents.id })
     )[0]?.id;
@@ -362,7 +362,7 @@ async function ensureGlobalAgent(createdBy: string): Promise<void> {
     publishedAt: new Date(),
     openingMessage: "你好，我可以在你有权限访问的全部知识库中查找依据并回答问题。",
     systemPrompt:
-      "你是企业全局 AI 助手。必须只基于当前用户有权限访问的知识库上下文回答；使用依据时必须展示引用来源和知识库名称；没有可靠依据时明确说明未找到依据，不得编造。",
+      "你是企业全局 AI 助手。必须只基于当前用户有权限访问的知识库上下文回答；没有可靠依据时明确说明未找到依据，不得编造。",
     recommendedQuestions: [
       "我可以查询哪些知识库内容？",
       "公司制度里有哪些常见流程？",

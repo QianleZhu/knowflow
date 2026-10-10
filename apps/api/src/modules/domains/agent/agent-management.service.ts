@@ -95,7 +95,7 @@ export class AgentManagementService {
           description: input.description ?? null,
           type: "official",
           ownerId: null,
-          systemPrompt: this.ensureCitationPrompt(
+          systemPrompt: this.ensureGroundedPrompt(
             input.systemPrompt ?? this.defaultSystemPrompt(input.name),
           ),
           openingMessage: input.openingMessage ?? null,
@@ -201,7 +201,7 @@ export class AgentManagementService {
       values.description = input.description;
     }
     if (input.systemPrompt !== undefined) {
-      values.systemPrompt = this.ensureCitationPrompt(input.systemPrompt);
+      values.systemPrompt = this.ensureGroundedPrompt(input.systemPrompt);
     }
     if (input.openingMessage !== undefined) {
       values.openingMessage = input.openingMessage;
@@ -429,7 +429,7 @@ export class AgentManagementService {
       documentsText,
       "Return JSON with exactly these fields: name, description, systemPrompt, openingMessage, recommendedQuestions.",
       "recommendedQuestions must contain 3 to 5 concise Chinese questions.",
-      "systemPrompt must require: answer only from authorized knowledge, show citation sources when evidence is used, and do not fabricate unsupported answers.",
+      "systemPrompt must require: answer only from authorized knowledge and do not fabricate unsupported answers.",
     ].join("\n\n");
   }
 
@@ -442,7 +442,7 @@ export class AgentManagementService {
     return {
       name: this.normalizeText(parsed["name"], fallback.name, 160),
       description: this.normalizeText(parsed["description"], fallback.description, 2000),
-      systemPrompt: this.ensureCitationPrompt(
+      systemPrompt: this.ensureGroundedPrompt(
         this.normalizeText(parsed["systemPrompt"], fallback.systemPrompt, 8000),
       ),
       openingMessage: this.normalizeText(parsed["openingMessage"], fallback.openingMessage, 1000),
@@ -586,13 +586,14 @@ export class AgentManagementService {
   }
 
   protected defaultSystemPrompt(agentName: string): string {
-    return this.ensureCitationPrompt(`你是${agentName}，必须基于授权知识库内容回答用户问题。`);
+    return this.ensureGroundedPrompt(`你是${agentName}，必须基于授权知识库内容回答用户问题。`);
   }
 
-  protected ensureCitationPrompt(prompt: string): string {
+  // 确保 Agent 只使用授权知识回答，并对缺少依据的情况明确说明。
+  protected ensureGroundedPrompt(prompt: string): string {
     const constraints =
-      "回答必须基于授权知识库内容；使用依据时必须展示引用来源；没有可靠依据时必须明确说明未找到依据，不得编造。";
-    return prompt.includes("引用") && (prompt.includes("不编造") || prompt.includes("不得编造"))
+      "回答必须基于授权知识库内容；没有可靠依据时必须明确说明未找到依据，不得编造。";
+    return prompt.includes("授权知识库") && (prompt.includes("不编造") || prompt.includes("不得编造"))
       ? prompt
       : `${prompt.trim()}\n\n${constraints}`;
   }
