@@ -57,9 +57,12 @@ export type RetrievalTrace = {
     knowledgeItem: number;
   };
   merged: number;
+  // 子块与知识条目跨路合并后，传给 Rerank 的候选总数。
   rrfReturned: number;
+  // Rerank 成功处理的子块/知识条目数量，不代表最终父块上下文数。
   reranked: number;
   rerankFailure: string | null;
+  // 父块 Max 聚合后交给提示词节点的上下文数量。
   final: number;
   channelFailures: RetrievalChannelFailure[];
 };

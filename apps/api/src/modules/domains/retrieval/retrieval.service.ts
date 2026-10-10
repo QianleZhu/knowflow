@@ -27,10 +27,11 @@ export class RetrievalAllChannelsFailedError extends Error {
   }
 }
 
+// 向量与全文通道分别为每次查询召回最多 20 个子块，再在路内去重排名。
 const VECTOR_TOP_K = 20;
 const FTS_TOP_K = 20;
 const KNOWLEDGE_ITEM_TOP_K = 10;
-// 将 RRF 排名前 50 的候选交给后续上下文重排节点。
+// 将子块粒度 RRF 排名前 50 的候选交给后续重排节点。
 const RRF_CANDIDATE_TOP_N = 50;
 // 使用标准 RRF 平滑常数，避免靠后名次的贡献过低。
 const RRF_K = 60;
@@ -210,7 +211,7 @@ export class RetrievalService {
     }
   }
 
-  // 对每个向量查询先按父块选出最高分子块，再限制唯一父块数量。
+  // 对每个向量查询直接召回子块，父块聚合延迟到重排之后执行。
   private async recallVector(
     query: string,
     embedding: number[],
@@ -222,9 +223,8 @@ export class RetrievalService {
 
     const vectorText = this.toPgVector(embedding);
     const scoreSql = sql<number>`1 - (${childChunks.embedding} <=> ${vectorText}::vector)`;
-    // 先按父块分组并选择相似度最高的子块，外层再按父块分数排序和限量。
-    const bestParentRows = db
-      .selectDistinctOn([parentChunks.id], this.documentRecallSelection(scoreSql))
+    return db
+      .select(this.documentRecallSelection(scoreSql))
       .from(childChunks)
       .innerJoin(parentChunks, eq(parentChunks.id, childChunks.parentChunkId))
       .innerJoin(documents, eq(documents.id, childChunks.documentId))
@@ -243,16 +243,11 @@ export class RetrievalService {
           sql`${query} <> ''`,
         ),
       )
-      .orderBy(parentChunks.id, desc(scoreSql), asc(childChunks.id))
-      .as("vector_best_child_per_parent");
-    return db
-      .select()
-      .from(bestParentRows)
-      .orderBy(desc(bestParentRows.score), asc(bestParentRows.parentChunkId))
+      .orderBy(desc(scoreSql), asc(childChunks.id))
       .limit(VECTOR_TOP_K);
   }
 
-  // 对全文查询先按父块选出 PGroonga 最高分子块，再限制唯一父块数量。
+  // 对全文查询直接召回子块，保留同一父块下的多个候选供重排判断。
   private async recallFts(
     queries: string[],
     allowedKnowledgeBaseIds: string[],
@@ -262,9 +257,8 @@ export class RetrievalService {
     // 便于与向量余弦相似度（0~1）跨通道比较；单调变换不影响排序。
     const rawScoreSql = sql<number>`pgroonga_score(${childChunks}.tableoid, ${childChunks}.ctid)`;
     const scoreSql = sql<number>`(${rawScoreSql}) / (1 + (${rawScoreSql}))`;
-    // 同一父块只保留 PGroonga 得分最高的子块，TopK 因此统计唯一父块数。
-    const bestParentRows = db
-      .selectDistinctOn([parentChunks.id], this.documentRecallSelection(scoreSql))
+    return db
+      .select(this.documentRecallSelection(scoreSql))
       .from(childChunks)
       .innerJoin(parentChunks, eq(parentChunks.id, childChunks.parentChunkId))
       .innerJoin(documents, eq(documents.id, childChunks.documentId))
@@ -282,12 +276,7 @@ export class RetrievalService {
           sql`${childChunks.content} &@~ pgroonga_query_escape(${query})`,
         ),
       )
-      .orderBy(parentChunks.id, desc(scoreSql), asc(childChunks.id))
-      .as("fts_best_child_per_parent");
-    return db
-      .select()
-      .from(bestParentRows)
-      .orderBy(desc(bestParentRows.score), asc(bestParentRows.parentChunkId))
+      .orderBy(desc(scoreSql), asc(childChunks.id))
       .limit(FTS_TOP_K);
   }
 
@@ -400,16 +389,15 @@ export class RetrievalService {
       .map(([, row], index) => ({ row, rank: index + 1 }));
   }
 
-  // 将父块重复命中压成单个文档候选，并保存该通道内的 Max 分数排名。
+  // 同一路多查询命中相同子块时取最高分，并按子块分数生成通道内名次。
   private toDocumentCandidates(
     rows: DocumentRecallRow[],
     channel: Extract<RetrievalChannel, "vector" | "fts">,
   ): RetrievalCandidate[] {
     return this.dedupeAndRankByMaxScore(
       rows,
-      (row) => row.parentChunkId,
-      (row) => row.score,
       (row) => row.childChunkId,
+      (row) => row.score,
     ).map(({ row, rank }) => ({
       id: row.parentChunkId,
       sourceType: "knowledge_document",
@@ -470,11 +458,11 @@ export class RetrievalService {
     }));
   }
 
-  // 合并同一文档父块或知识条目在不同召回通道中的结果，并保留各路名次。
+  // 合并跨通道重复的同一子块或知识条目，并保留各路独立名次供 RRF 计算。
   private mergeCandidates(candidates: RetrievalCandidate[]): RetrievalCandidate[] {
     const byKey = new Map<string, RetrievalCandidate>();
     for (const candidate of candidates) {
-      const key = `${candidate.sourceType}:${candidate.id}`;
+      const key = this.candidateMergeKey(candidate);
       const existing = byKey.get(key);
       if (existing === undefined) {
         byKey.set(key, candidate);
@@ -482,7 +470,7 @@ export class RetrievalService {
       }
 
       const channels = new Set([...existing.channels, ...candidate.channels]);
-      // 命中同一父块时，标题路径、子块正文和 child ID 必须来自同一个最高分子块。
+      // 同一子块跨通道命中时，标题路径、正文和子块 ID 保持来自同一候选。
       const candidateHasHigherScore = candidate.initialScore > existing.initialScore;
       byKey.set(key, {
         ...existing,
@@ -512,11 +500,20 @@ export class RetrievalService {
         if (scoreDifference !== 0) {
           return scoreDifference;
         }
-        const leftKey = `${left.sourceType}:${left.id}`;
-        const rightKey = `${right.sourceType}:${right.id}`;
+        const leftKey = this.candidateMergeKey(left);
+        const rightKey = this.candidateMergeKey(right);
         return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
       })
       .map((candidate, index) => ({ ...candidate, rrfRank: index + 1 }));
+  }
+
+  // 文档候选以子块 ID 作为 RRF 主键，知识条目仍以条目 ID 作为主键。
+  private candidateMergeKey(candidate: RetrievalCandidate): string {
+    const candidateId =
+      candidate.sourceType === "knowledge_document"
+        ? (candidate.childChunkId ?? candidate.id)
+        : candidate.id;
+    return `${candidate.sourceType}:${candidateId}`;
   }
 
   // 按标准 RRF 公式累计候选命中的各通道名次分数。

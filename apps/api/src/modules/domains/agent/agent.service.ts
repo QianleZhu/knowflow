@@ -90,9 +90,10 @@ import { QueryUnderstandingService } from "./query-understanding.service.js";
 
 const GRAPH_VERSION = "query-router-chat-v3";
 const MIN_CONTEXT_RERANK_SCORE = 0.05;
-// RRF 最多向 Qwen3 Rerank 提交 50 个候选，最终只保留 Top 10 上下文。
-const RERANK_CONTEXT_TOP_N = 10;
-const RERANK_INSTRUCTION = "请按候选内容对查询的相关性排序，优先选择能直接支持回答查询的内容。";
+// 父块 Max 聚合后，最多将 Top 10 个父块交给提示词构造节点。
+const RERANK_PARENT_CONTEXT_TOP_N = 10;
+const RERANK_INSTRUCTION =
+  "请仅依据标题路径与正文判断候选内容对查询的相关性，忽略候选 ID，优先选择能直接支持回答查询的内容。";
 const DEFAULT_CONVERSATION_TITLE = "新对话";
 const FALLBACK_ANSWER =
   "我没有在你有权限访问的知识中找到可靠依据，因此无法给出确定答案。你可以换一种问法，或联系知识库管理员补充相关资料。";
@@ -102,6 +103,22 @@ type ConversationRow = typeof conversations.$inferSelect;
 type MessageRow = typeof conversationMessages.$inferSelect;
 type CitationRow = typeof messageCitations.$inferSelect & {
   knowledgeBaseName: string | null;
+};
+
+// 保存每个待聚合候选的排序分数、来源子块和当前名次。
+type ScoredRetrievalCandidate = {
+  candidate: RetrievalCandidate;
+  score: number;
+  rerankScore: number | null;
+  rank: number;
+};
+
+// 保存父块聚合结果，并保留所有命中子块的召回来源。
+type AggregatedRetrievalCandidate = {
+  best: ScoredRetrievalCandidate;
+  channels: Set<RetrievalCandidate["channels"][number]>;
+  rrfScore: number;
+  rrfRank: number;
 };
 
 const AgentStateAnnotation = Annotation.Root({
@@ -659,7 +676,7 @@ export class AgentService {
     return { ...state, retrieval };
   }
 
-  // 用子块标题路径和内容重排 RRF 候选，并生成供提示词构造节点使用的 Top 10 上下文。
+  // 重排 RRF 子块候选，再按父块取 Max 分数并生成 Top 10 上下文。
   private async rerankContext(state: AgentState): Promise<AgentState> {
     const retrieval = state.retrieval;
     if (retrieval === null) {
@@ -668,49 +685,62 @@ export class AgentService {
 
     if (retrieval.candidates.length === 0) {
       await state.emit({ type: "agent.retrieval.completed", contextCount: 0 });
-      return { ...state, retrieval: this.withRerankedContexts(retrieval, [], false, null) };
+      return { ...state, retrieval: this.withRerankedContexts(retrieval, [], false, 0, null) };
     }
 
     const documents = retrieval.candidates.map((candidate) => this.toRerankDocument(candidate));
     let contexts: RetrievalContextItem[];
     let rerankSucceeded = false;
     let rerankFailure: string | null = null;
+    let rerankedCandidateCount = 0;
     try {
       const ranked = await this.llm.rerank(
         retrieval.query,
         documents,
-        RERANK_CONTEXT_TOP_N,
+        retrieval.candidates.length,
         undefined,
         RERANK_INSTRUCTION,
       );
-      const expectedCount = Math.min(RERANK_CONTEXT_TOP_N, retrieval.candidates.length);
       if (
-        ranked.length !== expectedCount ||
+        ranked.length !== retrieval.candidates.length ||
         new Set(ranked.map((item) => item.index)).size !== ranked.length
       ) {
         throw new Error("Qwen3-Rerank 返回结果不完整");
       }
 
-      contexts = ranked.map(({ index, relevanceScore }, rank) => {
+      const scoredCandidates = ranked.map(({ index, relevanceScore }, rank) => {
         const candidate = retrieval.candidates[index];
         if (candidate === undefined) {
           throw new Error("Qwen3-Rerank 返回了无效候选索引");
         }
-        return this.toRetrievalContext(candidate, rank + 1, relevanceScore);
+        return {
+          candidate,
+          score: relevanceScore,
+          rerankScore: relevanceScore,
+          rank: rank + 1,
+        } satisfies ScoredRetrievalCandidate;
       });
+      contexts = this.toTopParentContexts(scoredCandidates);
       rerankSucceeded = true;
+      rerankedCandidateCount = ranked.length;
     } catch {
-      // 模型不可用或返回无效排名时，保留 RRF 前十条，让问答链路继续执行。
-      contexts = retrieval.candidates
-        .slice(0, RERANK_CONTEXT_TOP_N)
-        .map((candidate, index) => this.toRetrievalContext(candidate, index + 1, null));
-      rerankFailure = "Qwen3-Rerank 调用失败或结果无效，已回退至 RRF Top 10";
+      // 模型不可用时按子块 RRF 分数做父块 Max 聚合，保留检索链路可用性。
+      contexts = this.toTopParentContexts(
+        retrieval.candidates.map((candidate) => ({
+          candidate,
+          score: candidate.rrfScore,
+          rerankScore: null,
+          rank: candidate.rrfRank,
+        })),
+      );
+      rerankFailure = "Qwen3-Rerank 调用失败或结果无效，已回退至 RRF 子块 Max 聚合";
     }
 
     const updatedRetrieval = this.withRerankedContexts(
       retrieval,
       contexts,
       rerankSucceeded,
+      rerankedCandidateCount,
       rerankFailure,
     );
     await state.emit({
@@ -720,17 +750,74 @@ export class AgentService {
     return { ...state, retrieval: updatedRetrieval };
   }
 
+  // 将重排后的子块按父块分组，使用最高相关性分数代表父块并截取 Top 10。
+  private toTopParentContexts(
+    scoredCandidates: ScoredRetrievalCandidate[],
+  ): RetrievalContextItem[] {
+    const grouped = new Map<string, AggregatedRetrievalCandidate>();
+    for (const scored of scoredCandidates) {
+      const { candidate } = scored;
+      const groupId =
+        candidate.sourceType === "knowledge_document"
+          ? (candidate.parentChunkId ?? candidate.id)
+          : (candidate.knowledgeItemId ?? candidate.id);
+      const groupKey = `${candidate.sourceType}:${groupId}`;
+      const existing = grouped.get(groupKey);
+      if (existing === undefined) {
+        grouped.set(groupKey, {
+          best: scored,
+          channels: new Set(candidate.channels),
+          rrfScore: candidate.rrfScore,
+          rrfRank: candidate.rrfRank,
+        });
+        continue;
+      }
+
+      candidate.channels.forEach((channel) => existing.channels.add(channel));
+      existing.rrfScore = Math.max(existing.rrfScore, candidate.rrfScore);
+      existing.rrfRank = Math.min(existing.rrfRank, candidate.rrfRank);
+      if (
+        scored.score > existing.best.score ||
+        (scored.score === existing.best.score && scored.rank < existing.best.rank)
+      ) {
+        existing.best = scored;
+      }
+    }
+
+    return [...grouped.entries()]
+      .sort(([leftKey, left], [rightKey, right]) => {
+        const scoreDifference = right.best.score - left.best.score;
+        if (scoreDifference !== 0) {
+          return scoreDifference;
+        }
+        if (left.best.rank !== right.best.rank) {
+          return left.best.rank - right.best.rank;
+        }
+        return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+      })
+      .slice(0, RERANK_PARENT_CONTEXT_TOP_N)
+      .map(([, aggregate], index) => {
+        const candidate: RetrievalCandidate = {
+          ...aggregate.best.candidate,
+          channels: [...aggregate.channels],
+          rrfScore: aggregate.rrfScore,
+          rrfRank: aggregate.rrfRank,
+        };
+        return this.toRetrievalContext(candidate, index + 1, aggregate.best.rerankScore);
+      });
+  }
+
   // 按模型输入格式拼装文档标题、子块标题路径和子块正文。
   private toRerankDocument(candidate: RetrievalCandidate): string {
     if (candidate.sourceType === "knowledge_item") {
-      return `知识条目标题：${candidate.title}\n内容：${candidate.content}`;
+      return `候选知识条目 ID：${candidate.knowledgeItemId ?? candidate.id}\n知识条目标题：${candidate.title}\n正文：${candidate.content}`;
     }
 
     // 结果展示中的标题路径统一从块元数据读取。
     const headingPath = candidate.metadata?.headingPath?.join(" > ");
     const normalizedHeadingPath =
       headingPath === undefined || headingPath.length === 0 ? "未提供" : headingPath;
-    return `文档标题：${candidate.title}\n子块标题路径：${normalizedHeadingPath}\n子块内容：${candidate.content}`;
+    return `子块 ID：${candidate.childChunkId ?? candidate.id}\n文档标题：${candidate.title}\n子块标题路径：${normalizedHeadingPath}\n子块正文：${candidate.content}`;
   }
 
   // 将重排结果转成最终上下文，并用父块完整内容供答案生成使用。
@@ -755,6 +842,7 @@ export class AgentService {
     retrieval: RetrievalResult,
     contexts: RetrievalContextItem[],
     rerankSucceeded: boolean,
+    rerankedCandidateCount: number,
     rerankFailure: string | null,
   ): RetrievalResult {
     return {
@@ -762,7 +850,7 @@ export class AgentService {
       contexts,
       trace: {
         ...retrieval.trace,
-        reranked: rerankSucceeded ? contexts.length : 0,
+        reranked: rerankSucceeded ? rerankedCandidateCount : 0,
         rerankFailure,
         final: contexts.length,
       },
