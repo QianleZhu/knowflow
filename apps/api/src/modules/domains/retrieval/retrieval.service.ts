@@ -12,6 +12,7 @@ import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { AliyunLlmService } from "../../../shared/llm/aliyun-llm.js";
 import type {
   RetrievalCandidate,
+  RetrievalCandidateMetadata,
   RetrievalChannel,
   RetrievalChannelFailure,
   RetrievalResult,
@@ -51,7 +52,7 @@ type DocumentRecallRow = {
   content: string;
   parentTitle: string | null;
   parentContent: string;
-  headingPath: unknown;
+  metadata: unknown;
   pageStart: number | null;
   pageEnd: number | null;
   chunkIndex: number;
@@ -335,7 +336,8 @@ export class RetrievalService {
       content: childChunks.content,
       parentTitle: parentChunks.title,
       parentContent: parentChunks.content,
-      headingPath: parentChunks.headingPath,
+      // 检索候选从父块的元数据读取标题路径。
+      metadata: parentChunks.metadata,
       pageStart: parentChunks.pageStart,
       pageEnd: parentChunks.pageEnd,
       chunkIndex: childChunks.chunkIndex,
@@ -428,7 +430,7 @@ export class RetrievalService {
       rrfRank: 0,
       initialScore: row.score,
       rerankScore: null,
-      headingPath: this.normalizeHeadingPath(row.headingPath),
+      metadata: this.normalizeMetadata(row.metadata),
       knowledgeItemVerified: false,
       sourceExpired: false,
       tokenCount: this.estimateTokenCount(row.parentContent),
@@ -461,7 +463,7 @@ export class RetrievalService {
       rrfRank: 0,
       initialScore: row.score,
       rerankScore: null,
-      headingPath: null,
+      metadata: null,
       knowledgeItemVerified: row.verifiedBy !== null,
       sourceExpired: row.status === "expired",
       tokenCount: this.estimateTokenCount(row.content),
@@ -491,7 +493,7 @@ export class RetrievalService {
           ? {
               childChunkId: candidate.childChunkId,
               content: candidate.content,
-              headingPath: candidate.headingPath,
+              metadata: candidate.metadata,
               pageOrSection: candidate.pageOrSection,
               snippet: candidate.snippet,
             }
@@ -522,12 +524,16 @@ export class RetrievalService {
     return Object.values(channelRanks).reduce((score, rank) => score + 1 / (RRF_K + rank), 0);
   }
 
-  private normalizeHeadingPath(value: unknown): string[] | null {
-    if (!Array.isArray(value)) {
+  // 从父块元数据读取可用于检索和提示词的标题路径。
+  private normalizeMetadata(value: unknown): RetrievalCandidateMetadata | null {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
       return null;
     }
-    const headingPath = value.filter((item): item is string => typeof item === "string");
-    return headingPath.length === 0 ? null : headingPath;
+    const headingPathValue = "headingPath" in value ? value.headingPath : undefined;
+    const headingPath = Array.isArray(headingPathValue)
+      ? headingPathValue.filter((item): item is string => typeof item === "string")
+      : [];
+    return { headingPath: headingPath.length === 0 ? null : headingPath };
   }
 
   private snippet(content: string, maxLength: number): string {

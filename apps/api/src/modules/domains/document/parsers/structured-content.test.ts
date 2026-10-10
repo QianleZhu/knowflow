@@ -19,7 +19,7 @@ void it("recognizes code fences, setext headings, lists, escaped pipes and multi
     ["heading", "code", "list", "table"],
   );
   assert.equal(blocks[0]?.level, 1);
-  assert.deepEqual(splitParentChunks(blocks)[0]?.headingPath, ["总标题"]);
+  assert.deepEqual(splitParentChunks(blocks)[0]?.metadata.headingPath, ["总标题"]);
   assert.equal(blocks[3]?.table?.rows[0]?.cells[0]?.text, "a\\|b");
   assert.ok(
     blocks.every(
@@ -61,7 +61,7 @@ void it("parses Markdown natively without an available Docling service", async (
     parsed.structuredBlocks?.map((block) => block.kind),
     ["heading", "code", "heading", "paragraph"],
   );
-  assert.deepEqual(splitParentChunks(parsed.structuredBlocks).at(-1)?.headingPath, [
+  assert.deepEqual(splitParentChunks(parsed.structuredBlocks).at(-1)?.metadata.headingPath, [
     "标题",
     "小节",
   ]);

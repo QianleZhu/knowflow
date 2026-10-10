@@ -96,15 +96,11 @@
 
 PDF/DOCX/MD 需要启动独立 Docling 薄适配服务（见 services/docling/README.md），服务失败显式报错，不回退到图片页尾追加。图片识别后只插入描述正文，不添加图片标题、不保留位置标记；图片不可用/装饰图/识别失败则移除标记并记录告警。MD 内嵌图片可直接处理，HTTPS 外链需要 DOCLING_MD_IMAGE_ORIGINS 可信来源配置，相对路径图片需要附件。扫描件不调用 Docling。
 
-**③ 父子分段**（核心，常量 `document-processor.ts:27-31`）
+**③ 父子分段**（核心，`document-chunker.ts`）
 
-目标是「子块用于精确召回、父块用于完整上下文」。子块 `CHILD_TARGET_CHARS = 900` + `CHILD_OVERLAP_CHARS = 120` 重叠保证召回命中；父块 `PARENT_TARGET_CHARS = 2600`（硬上限 `PARENT_MAX_CHARS = 4000`）保证喂给 LLM 的上下文完整连贯。分段三层逐级细化（`splitParentChunks` `:497`）：
+目标是「子块用于精确召回、父块用于完整上下文」。父块目标 2000 字符、硬上限 2500；子块目标 200 字符、硬上限 250，普通正文最多重叠 60 个完整句子字符。解析器提供结构块，真正的标题结束当前章节；完整祖先路径写入父块 `metadata.headingPath`，正文只计实际内容。长章节按语义边界拆成多个父块，表格单独按完整数据行拆分。
 
-1. **按标题切节**（`splitHeadingSections` `:524`）：`detectHeadingLine` 识别 markdown `#`、数字编号（`1.`/`一、`）、中文章节标题，切成带 `headingPath` 的小节；标题行本身标记 `boundaryType=heading`。
-2. **语义打包成父块**（`splitSemanticParentLines` `:585`）：先 `splitTextBlocks` 按空行 / 行类型（标题/列表/段落）切块，再贪心累加到 `PARENT_TARGET_CHARS`——已积累内容达 65% 目标长度且加下一块会超长就断开，否则继续合并；单块超 `PARENT_MAX_CHARS` 先按句子（`。！？.!?`）切、再按定长兜底。
-3. **父块切子块**（`splitChildChunks` `:576`）：对每个父块 `splitByLength(content, 900, 120)` 滑窗切分，估算 `tokenCount`（length/4）。
-
-**写库**（`replaceChunks` `:365-434`，单事务）：先删旧父子块，逐父块写 `parentChunks`（带 `headingPath`/`pageStart-End`/`chunkerVersion`），其子块写 `childChunks`，`parentChunkId` 关联父块、`chunkIndex` 全局递增、`embeddingStatus=pending`。父块产出 0 子块即抛错。
+**写库与检索**：父块在 `metadata` 中保存 `headingPath`、来源和切分信息；子块元数据继承路径与来源。检索服务从父块 metadata 取路径，重排与答案提示词从候选 metadata 使用路径；父块 content 保持纯正文。父子片段仍在同一事务内写入，子块通过 `parentChunkId` 关联父块。
 
 **④ 批量向量化**（`embedChildChunks` `:436-495`）：按 `EMBEDDING_BATCH_SIZE = 10` 分批调嵌入模型，每条强校验 `EXPECTED_EMBEDDING_DIMENSION = 1024` 维，同事务写入 `embedding` 向量，状态置 completed。检索时子块命中扩展回父块全文（见支柱二）。
 

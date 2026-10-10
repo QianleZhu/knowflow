@@ -313,10 +313,11 @@ async function replaceChunks(
           knowledgeBaseId: document.knowledgeBaseId,
           title: parent.title,
           content: parent.content,
-          headingPath: parent.headingPath,
           pageStart: parent.pageStart,
           pageEnd: parent.pageEnd,
           metadata: {
+            // 父块路径随其他结构元数据一起保存，不再写入独立列。
+            ...parent.metadata,
             chunkerVersion: CHUNKER_VERSION,
             boundaryType: parent.boundaryType,
             processVersion,
@@ -356,7 +357,8 @@ async function replaceChunks(
           tokenCount: child.tokenCount,
           metadata: {
             parentTitle: parent.title,
-            headingPath: parent.headingPath,
+            // 子块沿用父块元数据中的标题路径。
+            headingPath: parent.metadata.headingPath,
             chunkerVersion: CHUNKER_VERSION,
             boundaryType: child.boundaryType,
             processVersion,

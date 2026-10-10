@@ -9,6 +9,10 @@ export type RetrievalChannelFailure = {
 
 export type RetrievalSourceType = "knowledge_document" | "knowledge_item";
 
+export type RetrievalCandidateMetadata = {
+  headingPath: string[] | null;
+};
+
 export type RetrievalCandidate = {
   id: string;
   sourceType: RetrievalSourceType;
@@ -19,7 +23,7 @@ export type RetrievalCandidate = {
   childChunkId: string | null;
   parentChunkId: string | null;
   title: string;
-  headingPath: string[] | null;
+  metadata: RetrievalCandidateMetadata | null;
   content: string;
   parentContent: string | null;
   snippet: string;

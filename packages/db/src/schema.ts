@@ -511,7 +511,6 @@ export const parentChunks = pgTable(
       .references(() => knowledgeBases.id),
     title: varchar("title", { length: 255 }),
     content: text("content").notNull(),
-    headingPath: jsonb("heading_path").default([]).notNull(),
     pageStart: integer("page_start"),
     pageEnd: integer("page_end"),
     metadata: jsonb("metadata").default({}).notNull(),

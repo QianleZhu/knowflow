@@ -15,7 +15,7 @@ type RecallDocumentRow = {
   content: string;
   parentTitle: string | null;
   parentContent: string;
-  headingPath: unknown;
+  metadata: unknown;
   pageStart: number | null;
   pageEnd: number | null;
   chunkIndex: number;
@@ -124,7 +124,7 @@ function makeDocumentRow(overrides: {
     content: overrides.content,
     parentTitle: "Parent title",
     parentContent: overrides.parentContent,
-    headingPath: null,
+    metadata: null,
     pageStart: null,
     pageEnd: null,
     chunkIndex: 1,

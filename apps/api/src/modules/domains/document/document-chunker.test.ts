@@ -66,14 +66,14 @@ void describe("long table parent splitting", () => {
           `table row must not be cut mid-line: ${line}`,
         );
       }
-      assert.ok(parent.content.length <= 4000, "piece must stay within parent max chars");
+      assert.ok(parent.content.length <= 2500, "piece must stay within parent max chars");
     }
 
     const allRows = parents.flatMap((parent) => dataRowsOf(parent.content));
     assert.equal(allRows.length, 140, "no data row may be lost or duplicated");
     assert.equal(new Set(allRows).size, 140);
     for (const parent of parents.slice(0, -1)) {
-      assert.ok(parent.content.length >= 2000, "filled pieces should approach the target size");
+      assert.ok(parent.content.length >= 1900, "filled pieces should approach the target size");
     }
   });
 
@@ -129,26 +129,32 @@ void describe("structured parent splitting", () => {
       120,
     );
   });
-  void it("keeps adjacent headings in separate parents without duplicating them or losing hierarchy", () => {
+  void it("stores heading paths in metadata while keeping them out of parent content", () => {
     const blocks: ParsedContentBlock[] = [
       { kind: "heading", markdown: "# TCP 握手总结", level: 1, pageNumbers: [1] },
+      { kind: "paragraph", markdown: "第一段正文", level: null, pageNumbers: [1] },
       { kind: "heading", markdown: "# TCP 握手总结", level: 1, pageNumbers: [1] },
+      { kind: "paragraph", markdown: "第二段正文", level: null, pageNumbers: [1] },
       { kind: "heading", markdown: "## TCP 基本认识", level: 2, pageNumbers: [1] },
+      { kind: "paragraph", markdown: "第三段正文", level: null, pageNumbers: [1] },
       { kind: "heading", markdown: "## TCP 基本认识", level: 2, pageNumbers: [1] },
+      { kind: "paragraph", markdown: "第四段正文", level: null, pageNumbers: [1] },
     ];
     const parents = splitParentChunks(blocks);
 
     assert.deepEqual(
       parents.map((parent) => parent.content),
+      ["第一段正文", "第二段正文", "第三段正文", "第四段正文"],
+    );
+    assert.deepEqual(
+      parents.map((parent) => parent.metadata.headingPath),
       [
-        "# TCP 握手总结",
-        "# TCP 握手总结",
-        "# TCP 握手总结\n\n## TCP 基本认识",
-        "# TCP 握手总结\n\n## TCP 基本认识",
+        ["TCP 握手总结"],
+        ["TCP 握手总结"],
+        ["TCP 握手总结", "TCP 基本认识"],
+        ["TCP 握手总结", "TCP 基本认识"],
       ],
     );
-    assert.deepEqual(parents[2]?.headingPath, ["TCP 握手总结", "TCP 基本认识"]);
-    assert.deepEqual(parents[3]?.headingPath, ["TCP 握手总结", "TCP 基本认识"]);
   });
 
   void it("rejects an explicitly empty tree instead of falling back to Markdown", () => {
@@ -167,7 +173,7 @@ void describe("structured parent splitting", () => {
 
     assert.ok(parents.length > 1);
     assert.ok(
-      parents.every((parent) => parent.content.length > 0 && parent.content.length <= 4000),
+      parents.every((parent) => parent.content.length > 0 && parent.content.length <= 2500),
     );
     assert.ok(parents.every((parent) => parent.pageStart === 1 && parent.pageEnd === 2));
     assert.ok(
@@ -201,7 +207,7 @@ void describe("table child splitting", () => {
       for (const line of lines) {
         assert.ok(line.startsWith("|") && line.endsWith("|"));
       }
-      assert.ok(child.content.length <= 1100, "child should stay near the target size");
+      assert.ok(child.content.length <= 250, "child must stay within the hard character limit");
       for (const row of dataRowsOf(child.content)) {
         assert.ok(!seen.has(row), "table child chunks must not overlap data rows");
         seen.add(row);
@@ -250,7 +256,7 @@ void describe("structured table provenance and oversized cells", () => {
     assert.ok(parents.length > 3);
     assert.ok(parents.every((parent) => parent.tableIds[0] === parents[0]?.tableIds[0]));
     assert.deepEqual(parents.at(-1)?.pageNumbers, [3]);
-    assert.ok(parents.every((parent) => parent.content.length <= 4000));
+    assert.ok(parents.every((parent) => parent.content.length <= 2500));
     const rows = parents.flatMap((parent) =>
       parent.blocks.flatMap((block) => block.table?.rows ?? []),
     );
@@ -277,7 +283,7 @@ void describe("structured table provenance and oversized cells", () => {
         parent.blocks.flatMap((block) => block.table?.rows ?? []).length,
       );
       assert.equal(new Set(indexes).size, indexes.length);
-      assert.ok(children.every((child) => child.content.length <= 900));
+      assert.ok(children.every((child) => child.content.length <= 250));
     }
   });
 
@@ -319,10 +325,10 @@ void describe("structured table provenance and oversized cells", () => {
       [7],
     );
     const parents = splitParentChunks(blocks);
-    assert.ok(parents.every((parent) => parent.content.length <= 4000 && parent.pageStart === 7));
+    assert.ok(parents.every((parent) => parent.content.length <= 2500 && parent.pageStart === 7));
     const children = parents.flatMap((parent) => splitChildChunks(parent.content, parent));
     assert.ok(
-      children.every((child) => child.content.length <= 900 && child.content.includes("表格行")),
+      children.every((child) => child.content.length <= 250 && child.content.includes("表格行")),
     );
     const indexes = children.flatMap((child) =>
       [...child.content.matchAll(/单元格记录(\d+)结束。/g)].map((match) => Number(match[1])),

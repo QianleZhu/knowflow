@@ -56,7 +56,7 @@ void describe("document text cleaning", () => {
   });
 });
 
-// 节点来源优先于正文标记：父块只计算实际内容页，重复标题是上下文。
+// 节点来源优先于正文标记：标题路径进入元数据，正文只保留实际内容。
 void describe("document chunking", () => {
   void it("keeps the full heading hierarchy including skipped levels", () => {
     const blocks = parseMarkdownBlocks(
@@ -64,16 +64,16 @@ void describe("document chunking", () => {
     );
     const parents = splitParentChunks(blocks);
     assert.deepEqual(
-      parents.map((parent) => parent.headingPath),
+      parents.map((parent) => parent.metadata.headingPath),
       [["第一章 总则"], ["第一章 总则", "管理要求"], ["第一章 总则", "适用范围"]],
     );
-    assert.match(parents[1]?.content ?? "", /^# 第一章 总则\n\n### 管理要求/);
+    assert.equal(parents[1]?.content, "说明");
   });
   void it("does not guess headings in TXT comments or numbered paragraphs", () => {
     const blocks = parsePlainTextBlocks("# 代码注释\n    return 1\n\n第一章只是普通文本\n1. 正文");
     assert.ok(blocks.every((block) => block.kind === "paragraph"));
     const parents = splitParentChunks(blocks);
-    assert.deepEqual(parents[0]?.headingPath, []);
+    assert.deepEqual(parents[0]?.metadata.headingPath, []);
     assert.match(parents[0].content, / {4}return 1/);
   });
   void it("merges short same-section paragraphs across pages", () => {

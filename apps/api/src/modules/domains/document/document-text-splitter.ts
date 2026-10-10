@@ -1,7 +1,4 @@
 // 自有递归文本切分器：依次寻找语义分隔符，最后才按 Unicode 字符兜底。
-const CHILD_OVERLAP_CHARS = 120;
-const CHILD_TARGET_CHARS = 900;
-
 // 逐级使用段落、换行、句末标点、短语和字符边界切分超长文本。
 export function recursiveSplitText(
   text: string,
@@ -119,8 +116,12 @@ export function splitFencedCode(text: string, targetChars: number): string[] {
   return chunks.length > 0 ? chunks : [text];
 }
 
-// 在相邻普通文本子块间复用完整句子，保留上下文且不从句中截取重叠区。
-export function addCompleteSentenceOverlap(chunks: string[]): string[] {
+// 在相邻普通文本子块间复用完整句子，同时遵守重叠预算和子块硬上限。
+export function addCompleteSentenceOverlap(
+  chunks: string[],
+  overlapLimit: number,
+  maxChunkChars: number,
+): string[] {
   return chunks.map((chunk, index) => {
     if (index === 0) return chunk;
     const previous = chunks[index - 1]?.trimEnd() ?? "";
@@ -128,10 +129,19 @@ export function addCompleteSentenceOverlap(chunks: string[]): string[] {
     let overlap = "";
     for (let sentenceIndex = matches.length - 1; sentenceIndex >= 0; sentenceIndex -= 1) {
       const sentence = matches[sentenceIndex]?.[0] ?? "";
-      if (sentence.length === 0 || overlap.length + sentence.length > CHILD_OVERLAP_CHARS) break;
-      overlap = `${sentence}${overlap}`;
+      const nextOverlap = `${sentence}${overlap}`;
+      const separator =
+        /[A-Za-z0-9]$/.test(nextOverlap) && /^[A-Za-z0-9]/.test(chunk) ? " " : "";
+      // 重叠优先保持完整句子；放不进任一预算时停止，不截断句子凑长度。
+      if (
+        sentence.length === 0 ||
+        nextOverlap.length > overlapLimit ||
+        nextOverlap.length + separator.length + chunk.length > maxChunkChars
+      )
+        break;
+      overlap = nextOverlap;
     }
-    if (overlap.length === 0 || overlap.length + chunk.length > CHILD_TARGET_CHARS) return chunk;
+    if (overlap.length === 0) return chunk;
     const separator = /[A-Za-z0-9]$/.test(overlap) && /^[A-Za-z0-9]/.test(chunk) ? " " : "";
     return `${overlap}${separator}${chunk}`;
   });

@@ -37,7 +37,9 @@ void it("maps all scanned pages and merges unfinished sentences without page sec
   assert.deepEqual(parents[1]?.pageNumbers, [3]);
   assert.match(parents[0].content, /前半部分后半部分/);
   assert.ok(
-    !parents.some((parent) => parent.headingPath.some((heading) => heading.includes("PDF 第"))),
+    !parents.some((parent) =>
+      parent.metadata.headingPath.some((heading) => heading.includes("PDF 第")),
+    ),
   );
   for (const parent of parents) assert.ok(splitChildChunks(parent.content, parent).length > 0);
 });

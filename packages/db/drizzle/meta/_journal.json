@@ -141,6 +141,13 @@
       "when": 1791527533986,
       "tag": "0019_unique_sauron",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1791616231065,
+      "tag": "0020_cheerful_talon",
+      "breakpoints": true
     }
   ]
 }

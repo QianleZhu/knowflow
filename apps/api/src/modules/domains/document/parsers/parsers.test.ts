@@ -117,13 +117,9 @@ void describe("parser registry and shared spreadsheet regression", () => {
       );
       assert.deepEqual(
         parents.map((parent) => parent.content),
-        [
-          "# 一级标题",
-          "# 一级标题\n\n## 二级标题",
-          "# 一级标题\n\n## 二级标题\n\n### 三级标题\n\n正文内容",
-        ],
+        ["正文内容"],
       );
-      assert.deepEqual(parents[2]?.headingPath, ["一级标题", "二级标题", "三级标题"]);
+      assert.deepEqual(parents[0]?.metadata.headingPath, ["一级标题", "二级标题", "三级标题"]);
     },
   );
 
@@ -147,7 +143,7 @@ void describe("parser registry and shared spreadsheet regression", () => {
       assert.ok(parents.length > 0);
       assert.ok(parents.every((parent) => parent.pageStart === 1 && parent.pageEnd === 1));
       assert.ok(
-        parents.every((parent) => parent.content.length > 0 && parent.content.length <= 4000),
+        parents.every((parent) => parent.content.length > 0 && parent.content.length <= 2500),
       );
       const parentChildPairs = parents.flatMap((parent) =>
         splitChildChunks(parent.content).map((child) => ({ parent, child })),
@@ -186,7 +182,7 @@ void describe("parser registry and shared spreadsheet regression", () => {
       assert.ok(blocks.some((block) => block.pageNumbers.includes(2)));
       assert.ok(parents.length > 0);
       assert.ok(
-        parents.every((parent) => parent.content.length > 0 && parent.content.length <= 4000),
+        parents.every((parent) => parent.content.length > 0 && parent.content.length <= 2500),
       );
 
       for (const [marker, expectedPage] of [
@@ -364,11 +360,24 @@ void describe("parser registry and shared spreadsheet regression", () => {
     });
   }
 
-  void it("keeps child overlap at 120 characters after extraction", () => {
-    const text = "知识流程".repeat(600);
+  void it("keeps complete-sentence child overlap within 60 characters after extraction", () => {
+    const text = Array.from(
+      { length: 300 },
+      (_, index) => `第${String(index)}句用于验证子块重叠。`,
+    ).join("");
     const children = splitChildChunks(text);
     assert.ok(children.length > 1);
-    assert.equal(children[0]?.content.slice(-120), children[1]?.content.slice(0, 120));
-    assert.ok(children.every((child) => child.content.length <= 900 && child.tokenCount > 0));
+    const previousSentences = children[0]?.content.match(/[^。！？.!?]+[。！？.!?]+/gu) ?? [];
+    const nextChunk = children[1]?.content ?? "";
+    let overlap = "";
+    for (let index = 0; index < previousSentences.length; index += 1) {
+      const candidate = previousSentences.slice(index).join("");
+      if (candidate.length <= 60 && nextChunk.startsWith(candidate)) {
+        overlap = candidate;
+        break;
+      }
+    }
+    assert.ok(overlap.length > 0 && overlap.length <= 60);
+    assert.ok(children.every((child) => child.content.length <= 250 && child.tokenCount > 0));
   });
 });

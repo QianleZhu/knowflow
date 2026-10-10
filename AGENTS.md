@@ -12,6 +12,10 @@
 
 不是简单 demo，应尽量接近真实系统，但允许在实现复杂度上做合理简化。
 
+### 本地服务环境
+
+本地开发使用的 PostgreSQL（含 pgvector）和 Redis 都运行在 Ubuntu（WSL）中。执行数据库迁移、数据库查询或 Redis 服务管理时，应在 Ubuntu 环境中操作，不要按 Windows 原生服务判断它们是否运行。
+
 ## 2. Agent 分工与边界
 
 | Agent           | 职责                                                                                                    | 可改                                                                                          | 不可越界                                                         |

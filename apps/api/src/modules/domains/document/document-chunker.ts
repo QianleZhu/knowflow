@@ -1,4 +1,4 @@
-// 统一结构块父子切分：章节、来源和表格行均来自解析器，不再按正文行猜测类型或反查页码。
+// 统一结构块父子切分：标题路径放入元数据，正文、来源和表格行均来自解析器结构节点。
 import type {
   ContentSource,
   ParsedContentBlock,
@@ -16,15 +16,22 @@ import {
   addCompleteSentenceOverlap,
 } from "./document-text-splitter.js";
 
-const PARENT_TARGET_CHARS = 2600;
-const PARENT_MAX_CHARS = 4000;
-const CHILD_TARGET_CHARS = 900;
-export const CHUNKER_VERSION = "structured-chunker-v5";
+const PARENT_TARGET_CHARS = 2000;
+const PARENT_MAX_CHARS = 2500;
+const CHILD_TARGET_CHARS = 200;
+const CHILD_MAX_CHARS = 250;
+const CHILD_OVERLAP_CHARS = 60;
+// 普通段落先预留重叠预算，避免把重叠文本加到 200 字符目标之外。
+const CHILD_BASE_TARGET_CHARS = CHILD_TARGET_CHARS - CHILD_OVERLAP_CHARS;
+export const CHUNKER_VERSION = "structured-chunker-v7";
 type BoundaryType = "heading" | "table" | "list" | "paragraph" | "sentence" | "length";
 export type ParentChunkInput = {
   title: string | null;
   content: string;
-  headingPath: string[];
+  metadata: {
+    // 保存完整祖先标题路径，供检索和问答使用。
+    headingPath: string[];
+  };
   boundaryType: BoundaryType;
   pageStart: number | null;
   pageEnd: number | null;
@@ -54,14 +61,8 @@ export function splitParentChunks(
   // 保存同一标题范围内的结构节点，分页不是章节边界。
   function flushSection(): void {
     if (body.length === 0 && ownHeading === null) return;
-    const context = headings
-      .map((heading) => `${"#".repeat(Math.min(6, heading.level))} ${heading.title}`)
-      .join("\n\n");
-    // 完整标题路径不能静默截断；无法在硬上限内给正文留出空间时显式报告解析失败。
-    if (context.length > PARENT_MAX_CHARS - 514)
-      throw new Error("文档标题路径过长，无法在父块上限内保留完整上下文");
-    const prefix = context;
-    const target = Math.max(512, PARENT_TARGET_CHARS - prefix.length - (prefix.length > 0 ? 2 : 0));
+    // 标题路径只写入父块元数据，正文切分预算完整留给实际内容。
+    const target = PARENT_TARGET_CHARS;
     const atoms = mergePageContinuations(body, target).flatMap((block) =>
       splitBlock(block, target),
     );
@@ -69,21 +70,20 @@ export function splitParentChunks(
     let first = true;
     // 重复祖先标题不参与页码计算；当前标题只作为章节首块的实际来源。
     function flushParent(): void {
-      if (current.length === 0 && !(first && ownHeading !== null)) return;
+      if (current.length === 0) return;
       const blocks = [...current];
       const actual = [...(first && ownHeading !== null ? [ownHeading] : []), ...blocks];
       const sources = deduplicateSources(actual.flatMap((block) => block.sources ?? []));
       const pageNumbers = uniquePages(actual.flatMap((block) => block.pageNumbers));
-      const content = [prefix, ...blocks.map((block) => block.markdown)]
-        .filter((part) => part.length > 0)
-        .join("\n\n");
+      const content = blocks.map((block) => block.markdown).join("\n\n");
       if (content.length === 0) return;
       if (content.length > PARENT_MAX_CHARS)
         throw new Error("结构节点的格式上下文超过父块上限，无法无损切分");
       parents.push({
         title: headings.at(-1)?.title ?? null,
         content,
-        headingPath: headings.map((heading) => heading.title),
+        // 保存完整标题路径供检索使用，不拼入正文或正文长度计算。
+        metadata: { headingPath: headings.map((heading) => heading.title) },
         boundaryType: blocks.some((block) => block.kind === "table")
           ? "table"
           : first && ownHeading !== null
@@ -151,6 +151,7 @@ function mergePageContinuations(
 ): ParsedContentBlock[] {
   const output: ParsedContentBlock[] = [];
   for (const block of blocks) {
+    //检查和上一块可不可以合并
     const previous = output.at(-1);
     const lastPage = previous?.pageNumbers.at(-1);
     const nextPage = block.pageNumbers[0];
@@ -201,7 +202,7 @@ function mergePageContinuations(
   return output;
 }
 
-// 超长节点保留原节点来源精度；表格优先按整行拆，代码优先按代码行拆。
+// 超长节点保留原节点来源；表格优先按整行拆，代码优先按代码行拆。
 function splitBlock(block: ParsedContentBlock, target: number): ParsedContentBlock[] {
   if (block.table !== undefined) return splitTable(block, target);
   if (block.tableRecord !== undefined) return splitTableRecord(block, target);
@@ -340,20 +341,20 @@ export function splitChildChunks(content: string, parent?: ParentChunkInput): Ch
         chunks.push({ content: piece.markdown, boundaryType: boundaryType(piece) });
       continue;
     }
-    const pieces = recursiveSplitText(
-      block.markdown,
-      CHILD_TARGET_CHARS,
-      0,
-      block.textFormat === "plain",
-    );
-    const withOverlap = block.kind === "paragraph" ? addCompleteSentenceOverlap(pieces) : pieces;
+    // 普通段落按预留重叠后的正文长度切分；列表等块仍按子块目标切分。
+    const targetChars = block.kind === "paragraph" ? CHILD_BASE_TARGET_CHARS : CHILD_TARGET_CHARS;
+    const pieces = recursiveSplitText(block.markdown, targetChars, 0, block.textFormat === "plain");
+    const withOverlap =
+      block.kind === "paragraph"
+        ? addCompleteSentenceOverlap(pieces, CHILD_OVERLAP_CHARS, CHILD_MAX_CHARS)
+        : pieces;
     for (const piece of withOverlap) {
       if (current.length > 0 && current.length + piece.length + 2 > CHILD_TARGET_CHARS) flush();
       current = current.length === 0 ? piece : `${current}\n\n${piece}`;
     }
   }
   flush();
-  if (chunks.some((chunk) => chunk.content.length > CHILD_TARGET_CHARS))
+  if (chunks.some((chunk) => chunk.content.length > CHILD_MAX_CHARS))
     throw new Error("结构节点的格式上下文超过子块上限，无法无损切分");
   return chunks.map((chunk, chunkIndex) => ({
     ...chunk,

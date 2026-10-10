@@ -928,7 +928,7 @@ function makeRetrievalContext(
     childChunkId: "00000000-0000-0000-0000-000000000060",
     parentChunkId: null,
     title: "Context",
-    headingPath: null,
+    metadata: null,
     content: "Context",
     parentContent: null,
     snippet: "Context",

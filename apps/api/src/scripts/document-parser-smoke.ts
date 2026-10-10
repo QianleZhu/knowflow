@@ -120,11 +120,11 @@ async function main(): Promise<void> {
       const parent = parentsById.get(child.parentChunkId);
       assert.ok(parent);
       const childMetadata = child.metadata as Record<string, unknown>;
+      const parentMetadata = parent.metadata as Record<string, unknown>;
       assert.equal(childMetadata["parentTitle"], parent.title);
-      assert.deepEqual(childMetadata["headingPath"], parent.headingPath);
+      assert.deepEqual(childMetadata["headingPath"], parentMetadata["headingPath"]);
       assert.equal(childMetadata["pageStart"], parent.pageStart);
       assert.equal(childMetadata["pageEnd"], parent.pageEnd);
-      const parentMetadata = parent.metadata as Record<string, unknown>;
       assert.deepEqual(childMetadata["pageNumbers"], parentMetadata["pageNumbers"]);
       assert.deepEqual(childMetadata["sources"], parentMetadata["sources"]);
       assert.deepEqual(childMetadata["tableIds"], parentMetadata["tableIds"]);
@@ -133,7 +133,7 @@ async function main(): Promise<void> {
       assert.ok(child.content.length > 0);
     }
     assert.ok(
-      parents.every((parent) => parent.content.length > 0 && parent.content.length <= 4000),
+      parents.every((parent) => parent.content.length > 0 && parent.content.length <= 2500),
       "父块必须有内容且不超过项目上限",
     );
     if (sourceType === "pdf") {
@@ -154,7 +154,11 @@ async function main(): Promise<void> {
     if (sourceType === "txt") {
       assert.equal(parents.length, 1);
       assert.ok(children.length >= 1);
-      assert.deepEqual(parents[0]?.headingPath, [], "TXT 的 # 标记不能猜测为标题");
+      assert.deepEqual(
+        (parents[0]?.metadata as Record<string, unknown>)["headingPath"],
+        [],
+        "TXT 的 # 标记不能猜测为标题",
+      );
     }
     assert.ok(
       children.every(
@@ -167,7 +171,6 @@ async function main(): Promise<void> {
         parents: parents.map((parent) => ({
           id: parent.id,
           content: parent.content,
-          headingPath: parent.headingPath,
           metadata: parent.metadata,
         })),
         children: children.map((child) => ({

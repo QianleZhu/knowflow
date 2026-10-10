@@ -726,7 +726,8 @@ export class AgentService {
       return `知识条目标题：${candidate.title}\n内容：${candidate.content}`;
     }
 
-    const headingPath = candidate.headingPath?.join(" > ");
+    // 结果展示中的标题路径统一从块元数据读取。
+    const headingPath = candidate.metadata?.headingPath?.join(" > ");
     const normalizedHeadingPath =
       headingPath === undefined || headingPath.length === 0 ? "未提供" : headingPath;
     return `文档标题：${candidate.title}\n子块标题路径：${normalizedHeadingPath}\n子块内容：${candidate.content}`;
@@ -768,11 +769,17 @@ export class AgentService {
     };
   }
 
+  // 从候选块元数据补充标题路径，让答案模型获得章节语境。
   private buildPrompt(state: AgentState): AgentState {
     const agent = this.requireAgent(state);
     const contexts = state.retrieval?.contexts ?? [];
     const contextText = contexts
-      .map((item) => `[${String(item.citationIndex)}] ${item.title}\n${item.contextText}`)
+      .map((item) => {
+        const headingPath = item.metadata?.headingPath?.join(" > ");
+        // 标题路径单独进入提示词，不写回父块正文。
+        const headingContext = headingPath === undefined ? "" : `标题路径：${headingPath}\n`;
+        return `[${String(item.citationIndex)}] ${item.title}\n${headingContext}${item.contextText}`;
+      })
       .join("\n\n");
     const prompt = [
       agent.systemPrompt ?? "",
