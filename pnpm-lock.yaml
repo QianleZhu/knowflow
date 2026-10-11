@@ -44,6 +44,9 @@ importers:
       '@e965/xlsx':
         specifier: 0.20.3
         version: 0.20.3
+      '@huggingface/tokenizers':
+        specifier: 0.2.0
+        version: 0.2.0
       '@knowflow/db':
         specifier: workspace:*
         version: link:../../packages/db
@@ -824,6 +827,9 @@ packages:
 
   '@floating-ui/utils@0.2.11':
     resolution: {integrity: sha512-RiB/yIh78pcIxl6lLMG0CgBXAZ2Y0eVHqMPYugu+9U0AeT6YBeiJpf7lbdJNIugFP5SIjwNRgo4DhR1Qxi26Gg==}
+
+  '@huggingface/tokenizers@0.2.0':
+    resolution: {integrity: sha512-LidMHe1FpcSYH4vcSjXooda34pC0M8m1gmDOv7SQi6Iv+ib1zX7J3sHBCC9/3FPCkn2k1b55FneVqMRxrr99pg==}
 
   '@humanfs/core@0.19.2':
     resolution: {integrity: sha512-UhXNm+CFMWcbChXywFwkmhqjs3PRCmcSa/hfBgLIb7oQ5HNb1wS0icWsGtSAUNgefHeI+eBrA8I1fxmbHsGdvA==}
@@ -4766,6 +4772,8 @@ snapshots:
       react-dom: 19.2.6(react@19.2.6)
 
   '@floating-ui/utils@0.2.11': {}
+
+  '@huggingface/tokenizers@0.2.0': {}
 
   '@humanfs/core@0.19.2':
     dependencies:

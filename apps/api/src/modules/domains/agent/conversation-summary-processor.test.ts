@@ -64,11 +64,19 @@ void describe("processConversationSummary", () => {
       assert.equal(update.table, conversations);
       const updateValues = update.values;
       assert.ok(updateValues);
-      assert.equal(updateValues["rollingSummary"], "x".repeat(SUMMARY_MAX_CHARS));
+      const persistedSummary = updateValues["rollingSummary"];
+      if (typeof persistedSummary !== "string") {
+        throw new Error("Expected rolling summary to be serialized as text");
+      }
+      assert.ok(persistedSummary.includes("existing summary"));
+      assert.ok(persistedSummary.includes('"startMessage":1'));
+      assert.ok(persistedSummary.includes('"endMessage":6'));
+      assert.ok(persistedSummary.includes("x".repeat(SUMMARY_MAX_CHARS)));
       assert.equal(updateValues["summarizedMessageCount"], 6);
       const [llmCall] = llmCalls;
       assert.ok(llmCall);
       assert.equal(llmCall.usageType, "query_understanding");
+      assert.equal(llmCall.messages.some((message) => message.content.includes("existing summary")), false);
       assert.equal(
         llmCall.messages.some((message) => message.content.includes("untrusted data")),
         true,

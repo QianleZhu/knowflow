@@ -14,13 +14,22 @@ type ModelConfig = {
   model: string;
   temperature: number;
   maxOutputTokens: number | null;
+  contextWindowTokens: number | null;
+  maxInputTokens: number | null;
   timeoutMs: number;
   retryCount: number;
 };
 
-type ChatMessage = {
+export type ChatRequestMessage = {
   role: "system" | "user" | "assistant";
   content: string;
+};
+
+type ChatMessage = ChatRequestMessage;
+
+export type ChatTokenUsage = {
+  inputTokens: number;
+  outputTokens: number;
 };
 
 export type RerankResult = {
@@ -37,6 +46,7 @@ type Qwen3RerankResponse = {
 
 export type ChatStreamChunk = {
   delta: string;
+  usage?: ChatTokenUsage;
 };
 
 @Injectable()
@@ -92,9 +102,7 @@ export function createAliyunLlmClient(): AliyunLlmClient {
 
 export class AliyunLlmClient {
   // 允许调用方注入配置解析器，便于在隔离环境中验证客户端行为。
-  constructor(
-    private readonly modelConfigResolver: ModelConfigResolver = resolveModelConfig,
-  ) {}
+  constructor(private readonly modelConfigResolver: ModelConfigResolver = resolveModelConfig) {}
 
   // 调用固定嵌入模型，并校验返回数量和向量维度。
   async embedTexts(texts: string[]): Promise<number[][]> {
@@ -217,12 +225,22 @@ export class AliyunLlmClient {
       temperature: input.temperature ?? config.temperature,
       ...(maxTokens === null ? {} : { max_tokens: maxTokens }),
       stream: true,
+      stream_options: { include_usage: true },
     });
 
     for await (const chunk of stream) {
       const delta = chunk.choices[0]?.delta.content;
+      const usage =
+        chunk.usage === null || chunk.usage === undefined
+          ? undefined
+          : {
+              inputTokens: chunk.usage.prompt_tokens,
+              outputTokens: chunk.usage.completion_tokens,
+            };
       if (typeof delta === "string" && delta.length > 0) {
-        yield { delta };
+        yield { delta, ...(usage === undefined ? {} : { usage }) };
+      } else if (usage !== undefined) {
+        yield { delta: "", usage };
       }
     }
   }
@@ -256,6 +274,8 @@ export class AliyunLlmClient {
       model: config.model,
       temperature: config.temperature,
       maxOutputTokens: config.maxOutputTokens,
+      contextWindowTokens: config.contextWindowTokens ?? null,
+      maxInputTokens: config.maxInputTokens ?? null,
       timeoutMs: config.timeoutMs,
       retryCount: config.retryCount,
     };

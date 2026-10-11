@@ -47,9 +47,11 @@ export function useAgentChat({
   const [statusText, setStatusText] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [isAsking, setIsAsking] = useState(false);
-  const [feedbackByMessageId, setFeedbackByMessageId] = useState<Record<string, FeedbackRating>>({});
+  const [feedbackByMessageId, setFeedbackByMessageId] = useState<Record<string, FeedbackRating>>(
+    {},
+  );
   const [correctionFor, setCorrectionFor] = useState<string | null>(null);
-  
+
   const listEndRef = useRef<HTMLDivElement>(null);
   const prevMessagesLenRef = useRef(0);
   const streamingRef = useRef(false);
@@ -219,7 +221,12 @@ export function useAgentChat({
     }
   }
 
-  async function streamAnswer(conversationId: string, content: string, draftId: string, signal: AbortSignal) {
+  async function streamAnswer(
+    conversationId: string,
+    content: string,
+    draftId: string,
+    signal: AbortSignal,
+  ) {
     const doFetch = () =>
       fetch(apiUrl(`/conversations/${conversationId}/messages`), {
         method: "POST",
@@ -283,7 +290,7 @@ export function useAgentChat({
           analyze_query: "理解问题中",
           retrieve_knowledge: "检索知识库中",
           rerank_context: "整理相关内容中",
-          build_prompt: "组织上下文中",
+          build_context: "构建上下文中",
           generate_answer_stream: "生成回答中",
         };
         setStatusText(stepLabels[event.step] ?? "处理中");
@@ -291,7 +298,9 @@ export function useAgentChat({
       }
       case "agent.answer.delta":
         setMessages((current) =>
-          current.map((m) => (m.id === draftId ? { ...m, content: `${m.content}${event.delta}` } : m)),
+          current.map((m) =>
+            m.id === draftId ? { ...m, content: `${m.content}${event.delta}` } : m,
+          ),
         );
         break;
       case "agent.completed":
@@ -310,7 +319,12 @@ export function useAgentChat({
   async function sendFeedback(
     messageId: string,
     rating: FeedbackRating,
-    extra?: { reason?: string; correctionContent?: string; suggestedSource?: string; suggestedIngestion?: boolean },
+    extra?: {
+      reason?: string;
+      correctionContent?: string;
+      suggestedSource?: string;
+      suggestedIngestion?: boolean;
+    },
   ) {
     setError(null);
     try {

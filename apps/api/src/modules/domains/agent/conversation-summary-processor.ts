@@ -3,12 +3,14 @@ import { and, asc, eq, inArray } from "drizzle-orm";
 
 import { AliyunLlmService } from "../../../shared/llm/aliyun-llm.js";
 import {
-  buildRollingSummaryPrompt,
+  appendCompressedSummarySegment,
+  buildMessageCompressionPrompt,
   clampSummary,
   selectMessagesForRollingSummary,
 } from "./agent-memory.js";
 import type { ConversationSummaryJobResult } from "./conversation-summary-queue.js";
 
+// 只压缩摘要游标之后、最近六条消息之前的原始历史，并追加为独立摘要段。
 export async function processConversationSummary(
   llm: AliyunLlmService,
   conversationId: string,
@@ -57,15 +59,11 @@ export async function processConversationSummary(
       messages: [
         {
           role: "system",
-          content:
-            "You maintain compact, factual conversation memory. Output only the updated summary.",
+          content: "You compress a new batch of conversation messages. Output only this batch's summary.",
         },
         {
           role: "user",
-          content: buildRollingSummaryPrompt(
-            conversation.rollingSummary,
-            selection.messagesToSummarize,
-          ),
+          content: buildMessageCompressionPrompt(selection.messagesToSummarize),
         },
       ],
       usageType: "query_understanding",
@@ -84,11 +82,22 @@ export async function processConversationSummary(
   await db
     .update(conversations)
     .set({
-      rollingSummary: summary,
+      rollingSummary: appendCompressedSummarySegment(
+        conversation.rollingSummary,
+        conversation.summarizedMessageCount,
+        selection.summarizedMessageCount,
+        summary,
+      ),
       summarizedMessageCount: selection.summarizedMessageCount,
       updatedAt: new Date(),
     })
-    .where(eq(conversations.id, conversationId));
+    // 用摘要游标做乐观并发控制，避免并发任务重复追加同一批压缩内容。
+    .where(
+      and(
+        eq(conversations.id, conversationId),
+        eq(conversations.summarizedMessageCount, conversation.summarizedMessageCount),
+      ),
+    );
 
   return {
     conversationId,

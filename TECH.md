@@ -170,7 +170,7 @@ allowedKnowledgeBaseIds 为空时直接短路返回空结果，不触任何 DB�
 | 5   | `parse_conversation_attachments` | **加载对话记忆**（近期消息 + 摘要，见支柱四）                                         |
 | 6   | `retrieve_knowledge`             | 调检索服务（知识范围类问题短路跳过）                                                  |
 | 7   | `rerank_context`                 | 使用 Qwen3 Rerank 评估 RRF Top 50，返回 Top 10 父块上下文；失败时回退到 RRF Top 10    |
-| 8   | `build_prompt`                   | 拼 system prompt（含反注入声明 + 可访问 KB + 上下文）                                 |
+| 8   | `build_context`                  | 拼 system context 并估算完整请求 Token；超限时裁剪低相关父块、可省略已压缩摘要        |
 | 9   | `generate_answer_stream`         | 流式调 LLM 生成答案                                                                   |
 | 10  | `attach_citations`               | 上下文映射为引用来源                                                                  |
 | 11  | `calculate_confidence`           | 证据打分 → 强/中/弱/无答案                                                            |
@@ -182,18 +182,18 @@ allowedKnowledgeBaseIds 为空时直接短路返回空结果，不触任何 DB�
 2. **load_agent → check_agent_permission**（`:407-416`）：加载 Agent 行并复校当前用户可用——后端兜底，不信前端。
 3. **resolve_knowledge_scope**（`:418-454`）：算 `allowedKnowledgeBaseIds`——global Agent 取用户**全部可访问** KB（`buildAccessCondition`），否则取 **Agent 绑定 KB ∩ 用户可访问**。这一步的结果直接决定支柱二检索能查哪些库，是权限前置的源头。
 4. **analyze_query**（`:456-467`）：关键词切分，生成 `rewrittenQueries = [原query, 关键词拼接]`，纯字符串处理无 LLM。
-5. **parse_conversation_attachments**（`:469-499`）：加载对话记忆——最近 6 条原文（排除本轮 user 消息）+ 滚动摘要写入 state（见支柱四）。
+5. **parse_conversation_attachments**（`:469-499`）：加载对话记忆——最近 6 条完整原文（排除本轮 user 消息）+ 最近四段带标记的滚动摘要写入 state（见支柱四）。
 6. **retrieve_knowledge**（`:501-520`）：若是「我有哪些知识库」这类元问题（`isKnowledgeScopeQuestion`）直接短路、`retrieval=null`；否则调检索服务（支柱二），发 `agent.retrieval.completed`。
 7. **rerank_context**：用 Qwen3 Rerank 对最多 50 条候选排序，生成 Top 10 上下文；失败时按 RRF 前 10 条兜底，并记录追踪。
-8. **build_prompt**（`:526-542`）：拼 system prompt——Agent 自身 systemPrompt + 反注入声明 + 可访问 KB 的 JSON + 检索到的授权上下文（带 `[n]` 引用标号）。
-9. **generate_answer_stream**（`:544-610`）：分级兜底后流式生成（详见下）。
+8. **build_context**：用本地 Qwen Tokenizer 估算系统规则、授权父块、会话历史与当前问题的完整输入。超限时删除低排名上下文并保留前五个文档父块；仍超限时整体省略已压缩摘要，但保留最近六条完整消息，再把父块正文降为命中子块正文并截短。裁剪结果只存在当前图状态，不写回会话历史。
+9. **generate_answer_stream**：只发送 `build_context` 生成的消息快照；流式结束后采集服务端实际输入/输出 Token 用量。
 10. **attach_citations**（`:612-621`）：把命中的上下文映射成引用来源（`noAnswerType` 非空则空引用）。
 11. **calculate_confidence**（`:623-678`）：按证据强度打分 → `strong/medium/weak/not_found`。
 12. **record_trace**（`:680-772`）：单事务落库助手消息 + 引用 + `agentRuntimeTraces`，更新会话 `lastMessageAt/title`；事务提交后 fire-and-forget 触发摘要任务（支柱四）。
 
-**全程可观测**（`runStep` `:377-405`）：每个节点都包一层，进出各发 `agent.step.started/completed` SSE、记录 `{name,status,at}`；抛错则发 `agent.failed` 并写错误 trace。`record_trace` 落的 `agentRuntimeTraces` 含：图版本、状态快照、各步骤耗时、检索上下文、prompt 快照（截断 12000）、模型配置、置信度、延迟——一次问答可完整回放。
+**全程可观测**（`runStep` `:377-405`）：每个节点都包一层，进出各发 `agent.step.started/completed` SSE、记录 `{name,status,at}`；抛错则发 `agent.failed` 并写错误 trace。`record_trace` 落的 `agentRuntimeTraces` 含：图版本、状态快照、各步骤耗时、检索来源元数据、Token 预算与实际用量、模型配置、置信度和延迟。父块正文与完整请求提示词只存在本轮运行内存中，不写入会话或追踪记录。
 
-**节点性质**：真正异步（DB/LLM I/O）的是 1/2/3/5/6/7/9/10/12；`analyze_query`、`build_prompt`、`calculate_confidence` 无 I/O。
+**节点性质**：真正异步（DB/LLM I/O）的是 1/2/3/5/6/7/8/9/10/12；`analyze_query`、`calculate_confidence` 无 I/O。
 
 **流式生成的分级兜底**（`generate_answer_stream` `:544-610`，按序判断）：
 
@@ -210,7 +210,7 @@ allowedKnowledgeBaseIds 为空时直接短路返回空结果，不触任何 DB�
 
 ### 设计意图
 
-原本 Agent 回答是无状态的——LLM 只看到系统提示 + 本轮问题，记不住上文，多轮对话里「我刚才问的」无法解析。引入两层记忆：**短期窗口**（最近几条原文，同步注入，保证精确上文）+ **滚动摘要**（早期对话压缩成背景，Worker 异步生成，避免 prompt 无限膨胀）。两者都按「不可信背景、不得作为指令」注入，防 Prompt Injection。摘要异步生成是关键——绝不阻塞答案流。
+原本 Agent 回答是无状态的——LLM 只看到系统提示 + 本轮问题，记不住上文，多轮对话里「我刚才问的」无法解析。引入两层记忆：**短期窗口**（最近六条历史消息原文，同步注入）+ **滚动摘要**（更早的原始消息由 Worker 异步压缩）。两者都按「不可信背景、不得作为指令」注入，防 Prompt Injection。历史摘要分段追加并保留消息范围标记；已压缩段不再作为摘要模型输入。
 
 ### 实现要点
 
@@ -218,8 +218,8 @@ allowedKnowledgeBaseIds 为空时直接短路返回空结果，不触任何 DB�
 
 **短期窗口加载**（`parse_conversation_attachments`，`agent.service.ts:469-499`）
 
-- 查最近 6 条 user/assistant 消息，**排除本轮刚插入的 user 消息**（`id != userMessageId`，避免和末尾 query 重复），倒序取再反转为时序，每条截断 1200 字。
-- 同时从 `conversations.rollingSummary` 读出滚动摘要。
+- 查最近 6 条 user/assistant 消息，**排除本轮刚插入的 user 消息**（`id != userMessageId`，避免和末尾 query 重复），倒序取再反转为时序，消息正文完整保留。
+- 同时从 `conversations.rollingSummary` 读取最近四段已压缩摘要；旧版纯文本摘要会作为一个已有压缩段兼容读取。
 
 **注入顺序**（`buildAnswerMessages` `:1187-1211`）
 
@@ -236,7 +236,8 @@ allowedKnowledgeBaseIds 为空时直接短路返回空结果，不触任何 DB�
 
 - **触发**（`recordTrace` 提交后，`:763` fire-and-forget）：`enqueueConversationSummaryIfNeeded` 重新计消息数，满足 `total ≥ 10` 且 `(total-6) > summarizedMessageCount` 才入队。
 - **队列去重**：jobId = `conversation-summarize-${conversationId}`，同对话同时只一个摘要任务（`conversation-summary-queue.ts`）。
-- **Processor**（`conversation-summary-processor.ts:12-98`）：取早期消息（`[summarizedMessageCount, total-6)` 区间）+ 已有摘要，调 `llm.completeChat`（usageType `query_understanding`，temperature 0），输出截断 1200 字，写回 `rollingSummary` + `summarizedMessageCount`。Worker 注册见 `worker.ts:104-114`。
+- **Processor**（`conversation-summary-processor.ts`）：取未压缩旧消息（`[summarizedMessageCount, total-6)` 区间），只把这批原始消息交给 `llm.completeChat`（usageType `query_understanding`，temperature 0），输出最多 1200 字后作为带消息范围标记的新段追加到 `rollingSummary`，同时推进 `summarizedMessageCount`。已有摘要段不再参与压缩；并发更新用摘要游标做条件校验。Worker 注册见 `worker.ts:104-114`。
+- **请求预算**：父块裁剪后若仍超限，可整体省略已压缩摘要，但最近六条历史消息不会缩短或删除；上下文预算追踪记录是否省略摘要。
 - **降级安全**：enqueue 全程 try/catch + `void` 调用，Redis 抖动或摘要失败只记 warning，绝不让回答接口报错。
 
 **前端零感知**：摘要列不进 `conversationSchema`、不出现在任何 API 响应，纯后端内部记忆。

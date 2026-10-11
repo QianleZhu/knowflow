@@ -16,6 +16,8 @@ type ModelUsageSettings = {
   model: string;
   temperature: number;
   maxOutputTokens: number | null;
+  contextWindowTokens?: number;
+  maxInputTokens?: number;
   timeoutMs: number;
   retryCount: number;
 };
@@ -43,6 +45,8 @@ const MODEL_USAGE_SETTINGS = {
     model: "qwen-plus",
     temperature: 0.7,
     maxOutputTokens: 4096,
+    contextWindowTokens: 1_000_000,
+    maxInputTokens: 995_904,
     timeoutMs: 30000,
     retryCount: 2,
   },

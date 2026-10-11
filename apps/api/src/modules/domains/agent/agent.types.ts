@@ -10,6 +10,7 @@ import type {
 
 import type { AuthenticatedUser } from "../auth/auth.types.js";
 import type { RetrievalResult } from "../retrieval/retrieval.types.js";
+import type { ChatRequestMessage, ChatTokenUsage } from "../../../shared/llm/aliyun-llm.js";
 import type { AccessibleKnowledgeBase } from "./agent-scope.js";
 import type { RecentConversationMessage } from "./agent-memory.js";
 import type { QueryPlan } from "./query-understanding.service.js";
@@ -18,6 +19,20 @@ export type SseEmitter = (event: AskStreamEvent) => Promise<void>;
 
 export type RuntimeAgent = Agent & {
   systemPrompt: string | null;
+};
+
+export type ContextTokenBudgetTrace = {
+  estimatedInputTokens: number;
+  hardInputLimitTokens: number;
+  safeInputLimitTokens: number;
+  safetyMarginTokens: number;
+  includedContextIds: string[];
+  droppedContextIds: string[];
+  retainedParentCount: number;
+  historySummaryOmitted: boolean;
+  requestHistoryMessageCount: number;
+  actualInputTokens: number | null;
+  actualOutputTokens: number | null;
 };
 
 export type AgentState = {
@@ -35,6 +50,9 @@ export type AgentState = {
   expandedKeywords: string[];
   retrieval: RetrievalResult | null;
   promptSnapshot: string | null;
+  requestMessages?: ChatRequestMessage[] | null;
+  contextTokenBudget?: ContextTokenBudgetTrace | null;
+  actualTokenUsage?: ChatTokenUsage | null;
   answer: string;
   citations: Citation[];
   confidenceLevel: ConfidenceLevel | null;
