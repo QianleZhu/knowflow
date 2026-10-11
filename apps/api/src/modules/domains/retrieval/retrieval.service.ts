@@ -57,7 +57,6 @@ type DocumentRecallRow = {
   pageStart: number | null;
   pageEnd: number | null;
   chunkIndex: number;
-  tokenCount: number | null;
   createdAt: Date;
   pageOrSection: string | null;
   score: number;
@@ -330,7 +329,6 @@ export class RetrievalService {
       pageStart: parentChunks.pageStart,
       pageEnd: parentChunks.pageEnd,
       chunkIndex: childChunks.chunkIndex,
-      tokenCount: childChunks.tokenCount,
       createdAt: childChunks.createdAt,
       pageOrSection: sql<string | null>`coalesce(${parentChunks.title}, ${documents.title})`,
       score,
@@ -421,7 +419,6 @@ export class RetrievalService {
       metadata: this.normalizeMetadata(row.metadata),
       knowledgeItemVerified: false,
       sourceExpired: false,
-      tokenCount: this.estimateTokenCount(row.parentContent),
     }));
   }
 
@@ -454,7 +451,6 @@ export class RetrievalService {
       metadata: null,
       knowledgeItemVerified: row.verifiedBy !== null,
       sourceExpired: row.status === "expired",
-      tokenCount: this.estimateTokenCount(row.content),
     }));
   }
 
@@ -536,10 +532,6 @@ export class RetrievalService {
   private snippet(content: string, maxLength: number): string {
     const normalized = content.replace(/\s+/g, " ").trim();
     return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}...` : normalized;
-  }
-
-  private estimateTokenCount(content: string): number {
-    return Math.max(1, Math.ceil(content.trim().length / 4));
   }
 
   private toPgVector(embedding: number[]): string {

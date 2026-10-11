@@ -538,7 +538,6 @@ export const childChunks = pgTable(
       .references(() => knowledgeBases.id),
     content: text("content").notNull(),
     chunkIndex: integer("chunk_index").notNull(),
-    tokenCount: integer("token_count"),
     metadata: jsonb("metadata").default({}).notNull(),
     embedding: vector("embedding", { dimensions: 1024 }),
     embeddingStatus: embeddingStatusEnum("embedding_status").default("pending").notNull(),

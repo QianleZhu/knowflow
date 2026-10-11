@@ -1,0 +1,1 @@
+ALTER TABLE "child_chunks" DROP COLUMN "token_count";

@@ -19,7 +19,6 @@ type RecallDocumentRow = {
   pageStart: number | null;
   pageEnd: number | null;
   chunkIndex: number;
-  tokenCount: number | null;
   createdAt: Date;
   pageOrSection: string | null;
   score: number;
@@ -128,7 +127,6 @@ function makeDocumentRow(overrides: {
     pageStart: null,
     pageEnd: null,
     chunkIndex: 1,
-    tokenCount: null,
     createdAt: new Date("2026-06-04T00:00:00.000Z"),
     pageOrSection: "Parent title",
     score: overrides.score,

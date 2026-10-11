@@ -941,7 +941,6 @@ function makeRetrievalContext(
     rerankScore: null,
     knowledgeItemVerified: false,
     sourceExpired: false,
-    tokenCount: 10,
     contextText: "Context",
     citationIndex: 1,
     ...overrides,

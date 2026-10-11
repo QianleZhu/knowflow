@@ -354,7 +354,6 @@ async function replaceChunks(
           knowledgeBaseId: document.knowledgeBaseId,
           content: child.content,
           chunkIndex: nextChildIndex++,
-          tokenCount: child.tokenCount,
           metadata: {
             parentTitle: parent.title,
             // 子块沿用父块元数据中的标题路径。

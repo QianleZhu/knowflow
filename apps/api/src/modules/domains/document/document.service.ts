@@ -993,7 +993,6 @@ export class DocumentService {
           seq: offset + index,
           content: chunk.content,
           parentId: null,
-          tokenCount: null,
         }),
       ),
       page: query.page,
@@ -1016,7 +1015,6 @@ export class DocumentService {
           content: childChunks.content,
           parentId: childChunks.parentChunkId,
           seq: childChunks.chunkIndex,
-          tokenCount: childChunks.tokenCount,
         })
         .from(childChunks)
         .where(eq(childChunks.documentId, documentId))
@@ -1034,7 +1032,6 @@ export class DocumentService {
           seq: chunk.seq,
           content: chunk.content,
           parentId: chunk.parentId,
-          tokenCount: chunk.tokenCount,
         }),
       ),
       page: query.page,

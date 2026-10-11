@@ -36,7 +36,6 @@ export type RetrievalCandidate = {
   rerankScore: number | null;
   knowledgeItemVerified: boolean;
   sourceExpired: boolean;
-  tokenCount: number;
 };
 
 export type RetrievalContextItem = RetrievalCandidate & {

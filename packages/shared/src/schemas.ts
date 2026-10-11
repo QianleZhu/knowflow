@@ -458,7 +458,6 @@ export const documentChunkItemSchema = z.object({
   seq: z.number().int().nonnegative(),
   content: z.string(),
   parentId: z.uuid().nullable(),
-  tokenCount: z.number().int().nullable(),
 });
 
 export const documentChunksResponseSchema = z.object({

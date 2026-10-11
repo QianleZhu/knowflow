@@ -378,6 +378,6 @@ void describe("parser registry and shared spreadsheet regression", () => {
       }
     }
     assert.ok(overlap.length > 0 && overlap.length <= 60);
-    assert.ok(children.every((child) => child.content.length <= 250 && child.tokenCount > 0));
+    assert.ok(children.every((child) => child.content.length <= 250));
   });
 });

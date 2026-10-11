@@ -242,7 +242,6 @@ function ChunksView({ doc }: { doc: KnowledgeDocument }) {
             <div key={chunk.id} className="p-3 border border-border rounded-md bg-surface flex flex-col gap-2">
               <div className="flex justify-between items-center">
                 <Badge tone="neutral"># {chunk.seq}</Badge>
-                {chunk.tokenCount ? <span className="text-xs text-ink-subtle">{chunk.tokenCount} tokens</span> : null}
               </div>
               <p className="text-sm text-ink line-clamp-4 hover:line-clamp-none transition-all">{chunk.content}</p>
             </div>

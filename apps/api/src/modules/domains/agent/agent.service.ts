@@ -401,7 +401,7 @@ export class AgentService {
       );
     }
   }
-  //建图
+  // 构建问答图，并让无需检索的请求直接进入回复节点。
   private buildGraph() {
     return (
       new StateGraph(AgentStateAnnotation)
@@ -453,17 +453,17 @@ export class AgentService {
         .addEdge(START, "load_agent")
         .addEdge("load_agent", "check_agent_permission")
         .addEdge("check_agent_permission", "resolve_knowledge_scope")
-        // 先加载历史再理解追问；非知识查询直接进入回复路径，跳过召回和重排。
+        // 先加载历史再判断是否检索；直接回复跳过提示词构造，检索回答才构造知识问答提示词。
         .addEdge("resolve_knowledge_scope", "parse_conversation_attachments")
         .addEdge("parse_conversation_attachments", "analyze_query")
         .addConditionalEdges("analyze_query", (input) =>
           input.state.queryPlan === null
             ? isKnowledgeScopeQuestion(input.state.query)
-              ? "build_prompt"
+              ? "generate_answer_stream"
               : "rewrite_query"
             : input.state.queryPlan.needsRetrieval
               ? "rewrite_query"
-              : "build_prompt",
+              : "generate_answer_stream",
         )
         .addEdge("rewrite_query", "retrieve_knowledge")
         .addEdge("retrieve_knowledge", "rerank_context")

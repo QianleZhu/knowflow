@@ -43,7 +43,6 @@ export type ParentChunkInput = {
 type ChildChunkInput = {
   content: string;
   chunkIndex: number;
-  tokenCount: number;
   boundaryType: BoundaryType;
 };
 type Heading = { title: string; level: number };
@@ -321,7 +320,6 @@ export function splitChildChunks(content: string, parent?: ParentChunkInput): Ch
           {
             content,
             chunkIndex: 0,
-            tokenCount: estimateTokenCount(content),
             boundaryType: parent?.boundaryType ?? "paragraph",
           },
         ];
@@ -359,7 +357,6 @@ export function splitChildChunks(content: string, parent?: ParentChunkInput): Ch
   return chunks.map((chunk, chunkIndex) => ({
     ...chunk,
     chunkIndex,
-    tokenCount: estimateTokenCount(chunk.content),
   }));
 }
 
@@ -380,9 +377,4 @@ function boundaryType(block: ParsedContentBlock | undefined): BoundaryType {
   return block?.kind === "heading" || block?.kind === "table" || block?.kind === "list"
     ? block.kind
     : "paragraph";
-}
-
-// 估算子块 token 数，供现有向量流水线记录统计。
-function estimateTokenCount(text: string): number {
-  return Math.max(1, Math.ceil(text.trim().length / 4));
 }
