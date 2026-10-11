@@ -304,9 +304,7 @@ export class AgentService {
     const countByTraceId = new Map(spanCounts.map((row) => [row.traceId, row.value]));
 
     return {
-      items: rows.map((row) =>
-        this.toAgentTraceSummary(row, countByTraceId.get(row.id) ?? 0),
-      ),
+      items: rows.map((row) => this.toAgentTraceSummary(row, countByTraceId.get(row.id) ?? 0)),
     };
   }
 
@@ -371,16 +369,16 @@ export class AgentService {
       .select({ id: agentRuntimeTraceSpans.id })
       .from(agentRuntimeTraceSpans)
       .where(
-        and(
-          eq(agentRuntimeTraceSpans.id, spanId),
-          eq(agentRuntimeTraceSpans.traceId, traceId),
-        ),
+        and(eq(agentRuntimeTraceSpans.id, spanId), eq(agentRuntimeTraceSpans.traceId, traceId)),
       )
       .limit(1);
     if (span === undefined) throw new NotFoundException("未找到 Trace Span");
 
     const payloadRows = await db
-      .select({ type: agentRuntimeTracePayloads.payloadType, payload: agentRuntimeTracePayloads.payload })
+      .select({
+        type: agentRuntimeTracePayloads.payloadType,
+        payload: agentRuntimeTracePayloads.payload,
+      })
       .from(agentRuntimeTracePayloads)
       .where(eq(agentRuntimeTracePayloads.spanId, spanId))
       .orderBy(asc(agentRuntimeTracePayloads.createdAt));
@@ -392,11 +390,13 @@ export class AgentService {
     return { spanId, payloads: payloadRows };
   }
 
+  // 执行一次 Agent 问答，并在连接中断时取消未完成的下游工作。
   async ask(input: {
     conversationId: string;
     content: string;
     user: AuthenticatedUser;
     emit: SseEmitter;
+    signal?: AbortSignal;
   }): Promise<ConversationMessage> {
     //链路前校验流程
     const conversation = await this.findConversationForUser(input.conversationId, input.user);
@@ -468,6 +468,7 @@ export class AgentService {
         steps: [],
         startedAt,
         error: null,
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
         emit: input.emit,
       };
       // LangGraph 的全部异步节点共享本次 ask 的隔离 Collector。
@@ -630,9 +631,10 @@ export class AgentService {
     step: string,
     handler: (state: AgentState) => Promise<AgentState>,
   ): Promise<{ state: AgentState }> {
-    await state.emit({ type: "agent.step.started", step });
     const started = { name: step, status: "started" as const, at: new Date().toISOString() };
     try {
+      state.signal?.throwIfAborted();
+      await state.emit({ type: "agent.step.started", step });
       const stepState = {
         ...state,
         // 当前步骤追加到兼容旧客户端的状态快照。
@@ -644,9 +646,12 @@ export class AgentService {
           : await withAgentTraceSpan({
               name: step,
               kind: "agent_step",
+              ...(state.signal === undefined ? {} : { signal: state.signal }),
               operation: () => handler.call(this, stepState),
             });
+      if (step !== "record_trace") state.signal?.throwIfAborted();
       await next.emit({ type: "agent.step.completed", step });
+      if (step !== "record_trace") state.signal?.throwIfAborted();
       return {
         state: {
           ...next,
@@ -654,11 +659,16 @@ export class AgentService {
         },
       };
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Agent 步骤执行失败";
+      const cancelled = state.signal?.aborted === true;
+      const message = cancelled
+        ? "用户已停止生成"
+        : error instanceof Error
+          ? error.message
+          : "Agent 步骤执行失败";
       const retrieval =
         error instanceof RetrievalAllChannelsFailedError ? error.result : state.retrieval;
       await this.recordErroredTrace({ ...state, retrieval, error: message });
-      await state.emit({ type: "agent.failed", message });
+      if (!cancelled) await state.emit({ type: "agent.failed", message });
       throw error;
     }
   }
@@ -737,7 +747,10 @@ export class AgentService {
         conversationSummary: state.conversationSummary,
         accessibleKnowledgeBases: state.accessibleKnowledgeBases,
       },
-      { mode: process.env["QUERY_ROUTING_MODE"] === "llm_only" ? "llm_only" : "rules" },
+      {
+        mode: process.env["QUERY_ROUTING_MODE"] === "llm_only" ? "llm_only" : "rules",
+        ...(state.signal === undefined ? {} : { signal: state.signal }),
+      },
     );
     recordAgentTracePayload("routing_decision", {
       query: state.query,
@@ -759,6 +772,7 @@ export class AgentService {
       query: state.query,
       recentMessages: state.recentMessages,
       conversationSummary: state.conversationSummary,
+      ...(state.signal === undefined ? {} : { signal: state.signal }),
     });
     const originalQuery = state.query.trim();
     const normalizedRewrite = rewrittenQuery?.trim() ?? "";
@@ -842,6 +856,7 @@ export class AgentService {
       return { ...state, retrieval: null };
     }
 
+    // 检索业务参数进入 Trace；取消信号仅传给检索调用，避免序列化运行时对象。
     const retrievalInput = {
       query: state.query,
       rewrittenQueries: state.rewrittenQueries,
@@ -853,7 +868,10 @@ export class AgentService {
         : state.knowledgeScope,
     };
     recordAgentTracePayload("retrieval_request", retrievalInput);
-    const retrieval = await this.retrievalService.retrieve(retrievalInput);
+    const retrieval = await this.retrievalService.retrieve({
+      ...retrievalInput,
+      ...(state.signal === undefined ? {} : { signal: state.signal }),
+    });
     recordAgentTracePayload("retrieval_result", {
       query: retrieval.query,
       rewrittenQueries: retrieval.rewrittenQueries,
@@ -903,6 +921,7 @@ export class AgentService {
         documents,
         retrieval.candidates.length,
         RERANK_INSTRUCTION,
+        state.signal,
       );
       if (
         ranked.length !== retrieval.candidates.length ||
@@ -1280,6 +1299,7 @@ export class AgentService {
     for await (const chunk of this.llm.streamChat({
       messages,
       usageType: "chat",
+      ...(state.signal === undefined ? {} : { signal: state.signal }),
     })) {
       if (chunk.usage !== undefined) actualTokenUsage = chunk.usage;
       if (chunk.delta.length > 0) {
@@ -1502,7 +1522,10 @@ export class AgentService {
     }
     traceCollector.failSpanByName("record_trace", state.error);
     traceCollector.root.addPayload("failure", { message: state.error });
-    traceCollector.finishRoot("failed", state.error);
+    const cancelled = state.signal?.aborted === true;
+    const terminalStatus = cancelled ? "cancelled" : "failed";
+    traceCollector.finishRunningSpans(terminalStatus, state.error);
+    traceCollector.finishRoot(terminalStatus, state.error);
     const usageSummary = traceCollector.getUsageSummary();
     const traceRows = traceCollector.toDatabaseRows();
     await db.transaction(async (tx) => {
@@ -1514,7 +1537,7 @@ export class AgentService {
         messageId: null,
         userId: state.user.id,
         graphVersion: GRAPH_VERSION,
-        status: "failed",
+        status: terminalStatus,
         stateSnapshot: this.toStateSnapshot(state),
         steps: state.steps,
         retrievedContext: this.toTraceContextMetadata(state.retrieval?.contexts ?? []),
@@ -1557,7 +1580,8 @@ export class AgentService {
       conversationId: row.conversationId,
       userMessageId: row.userMessageId,
       messageId: row.messageId,
-      status: row.status === "failed" ? "failed" : "completed",
+      status:
+        row.status === "cancelled" ? "cancelled" : row.status === "failed" ? "failed" : "completed",
       createdAt: row.createdAt.toISOString(),
       latencyMs: row.latencyMs,
       inputTokens: row.inputTokens,
@@ -1569,9 +1593,7 @@ export class AgentService {
   }
 
   // 将数据库 Span 映射为前端时间线契约，并过滤无效费率快照。
-  private toAgentTraceSpan(
-    row: typeof agentRuntimeTraceSpans.$inferSelect,
-  ): AgentTraceSpan {
+  private toAgentTraceSpan(row: typeof agentRuntimeTraceSpans.$inferSelect): AgentTraceSpan {
     return {
       id: row.id,
       parentSpanId: row.parentSpanId,
@@ -1579,7 +1601,13 @@ export class AgentService {
       name: row.name,
       kind: row.kind,
       status:
-        row.status === "failed" ? "failed" : row.status === "running" ? "running" : "completed",
+        row.status === "cancelled"
+          ? "cancelled"
+          : row.status === "failed"
+            ? "failed"
+            : row.status === "running"
+              ? "running"
+              : "completed",
       startedAt: row.startedAt.toISOString(),
       finishedAt: row.finishedAt?.toISOString() ?? null,
       durationMs: row.durationMs,
@@ -1587,9 +1615,7 @@ export class AgentService {
       inputTokens: row.inputTokens,
       outputTokens: row.outputTokens,
       usageSource:
-        row.usageSource === "provider" || row.usageSource === "unknown"
-          ? row.usageSource
-          : null,
+        row.usageSource === "provider" || row.usageSource === "unknown" ? row.usageSource : null,
       estimatedCostCny: this.toNullableNumber(row.estimatedCostCny),
       priceSnapshot: this.toAgentTracePriceSnapshot(row.priceSnapshot),
       error: row.error,
@@ -2109,5 +2135,4 @@ export class AgentService {
     messages.push({ role: "user", content: state.query });
     return messages;
   }
-
 }

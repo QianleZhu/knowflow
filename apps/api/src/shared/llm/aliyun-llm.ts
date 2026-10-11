@@ -59,8 +59,8 @@ export type ChatStreamChunk = {
 @Injectable()
 export class AliyunLlmService {
   // 使用服务端固定的嵌入模型生成文本向量。
-  async embedTexts(texts: string[]): Promise<number[][]> {
-    return createAliyunLlmClient().embedTexts(texts);
+  async embedTexts(texts: string[], signal?: AbortSignal): Promise<number[][]> {
+    return createAliyunLlmClient().embedTexts(texts, signal);
   }
 
   // 使用固定重排模型为候选文档评分。
@@ -69,8 +69,9 @@ export class AliyunLlmService {
     documents: string[],
     topN: number,
     instruct?: string,
+    signal?: AbortSignal,
   ): Promise<RerankResult[]> {
-    return createAliyunLlmClient().rerank(query, documents, topN, instruct);
+    return createAliyunLlmClient().rerank(query, documents, topN, instruct, signal);
   }
 
   // 按内部用途流式生成对话内容。
@@ -79,6 +80,7 @@ export class AliyunLlmService {
     usageType?: Extract<ModelUsageType, "chat" | "query_understanding">;
     temperature?: number;
     maxOutputTokens?: number;
+    signal?: AbortSignal;
   }): AsyncIterable<ChatStreamChunk> {
     return createAliyunLlmClient().streamChat(input);
   }
@@ -92,6 +94,7 @@ export class AliyunLlmService {
     >;
     temperature?: number;
     maxOutputTokens?: number;
+    signal?: AbortSignal;
   }): Promise<string> {
     return createAliyunLlmClient().completeChat(input);
   }
@@ -112,7 +115,7 @@ export class AliyunLlmClient {
   constructor(private readonly modelConfigResolver: ModelConfigResolver = resolveModelConfig) {}
 
   // 调用固定嵌入模型，并校验返回数量和向量维度。
-  async embedTexts(texts: string[]): Promise<number[][]> {
+  async embedTexts(texts: string[], signal?: AbortSignal): Promise<number[][]> {
     if (texts.length === 0) {
       return [];
     }
@@ -122,10 +125,13 @@ export class AliyunLlmClient {
       const config = await this.resolveModelConfig("embedding");
       span?.setModel(config.model);
       span?.addPayload("request", { model: config.model, input: texts });
-      const response = await this.createOpenAiClient(config).embeddings.create({
-        model: config.model,
-        input: texts,
-      });
+      const response = await this.createOpenAiClient(config).embeddings.create(
+        {
+          model: config.model,
+          input: texts,
+        },
+        { signal },
+      );
       span?.addPayload("response", {
         ...response,
       });
@@ -144,7 +150,8 @@ export class AliyunLlmClient {
         return item.embedding;
       });
     } catch (error) {
-      span?.fail(error);
+      if (signal?.aborted) span?.cancel(error);
+      else span?.fail(error);
       throw error;
     } finally {
       span?.finish();
@@ -157,6 +164,7 @@ export class AliyunLlmClient {
     documents: string[],
     topN: number,
     instruct?: string,
+    signal?: AbortSignal,
   ): Promise<RerankResult[]> {
     if (documents.length === 0) {
       return [];
@@ -188,9 +196,13 @@ export class AliyunLlmClient {
               "Content-Type": "application/json",
             },
             body: JSON.stringify(requestBody),
-            signal: AbortSignal.timeout(config.timeoutMs),
+            signal:
+              signal === undefined
+                ? AbortSignal.timeout(config.timeoutMs)
+                : AbortSignal.any([signal, AbortSignal.timeout(config.timeoutMs)]),
           });
         } catch {
+          if (signal?.aborted) throw new DOMException("用户已停止生成", "AbortError");
           if (attempt === maxAttempts) {
             throw new Error("Model provider request failed");
           }
@@ -206,9 +218,13 @@ export class AliyunLlmClient {
 
         const body = (await response.json()) as Qwen3RerankResponse;
         span?.addPayload("response", body);
-        const rerankTokens = body.usage?.input_tokens ?? body.usage?.prompt_tokens ?? body.usage?.total_tokens;
+        const rerankTokens =
+          body.usage?.input_tokens ?? body.usage?.prompt_tokens ?? body.usage?.total_tokens;
         if (rerankTokens !== undefined) {
-          span?.setProviderUsage({ inputTokens: rerankTokens, outputTokens: body.usage?.output_tokens ?? 0 });
+          span?.setProviderUsage({
+            inputTokens: rerankTokens,
+            outputTokens: body.usage?.output_tokens ?? 0,
+          });
         }
         const results = body.results;
         if (!Array.isArray(results)) {
@@ -243,7 +259,8 @@ export class AliyunLlmClient {
 
       throw new Error("Model provider request failed");
     } catch (error) {
-      span?.fail(error);
+      if (signal?.aborted) span?.cancel(error);
+      else span?.fail(error);
       throw error;
     } finally {
       span?.finish();
@@ -256,6 +273,7 @@ export class AliyunLlmClient {
     usageType?: Extract<ModelUsageType, "chat" | "query_understanding">;
     temperature?: number;
     maxOutputTokens?: number;
+    signal?: AbortSignal;
   }): AsyncIterable<ChatStreamChunk> {
     const span = startAgentTraceSpan({ name: "model.chat.stream", kind: "model" });
     let responseText = "";
@@ -274,9 +292,12 @@ export class AliyunLlmClient {
         stream_options: { include_usage: true },
       };
       span?.addPayload("request", requestBody);
-      const stream = await this.createOpenAiClient(config).chat.completions.create({
-        ...requestBody,
-      });
+      const stream = await this.createOpenAiClient(config).chat.completions.create(
+        {
+          ...requestBody,
+        },
+        { signal: input.signal },
+      );
 
       for await (const chunk of stream) {
         const delta = chunk.choices[0]?.delta.content;
@@ -306,7 +327,8 @@ export class AliyunLlmClient {
       });
     } catch (error) {
       span?.addPayload("partial_response", { content: responseText });
-      span?.fail(error);
+      if (input.signal?.aborted) span?.cancel(error);
+      else span?.fail(error);
       throw error;
     } finally {
       span?.finish();
@@ -322,6 +344,7 @@ export class AliyunLlmClient {
     >;
     temperature?: number;
     maxOutputTokens?: number;
+    signal?: AbortSignal;
   }): Promise<string> {
     const span = startAgentTraceSpan({ name: "model.chat.complete", kind: "model" });
     try {
@@ -335,9 +358,10 @@ export class AliyunLlmClient {
         ...(maxTokens === null ? {} : { max_tokens: maxTokens }),
       };
       span?.addPayload("request", requestBody);
-      const response = await this.createOpenAiClient(config).chat.completions.create({
-        ...requestBody,
-      });
+      const response = await this.createOpenAiClient(config).chat.completions.create(
+        { ...requestBody },
+        { signal: input.signal },
+      );
       const content = response.choices[0]?.message.content ?? "";
       span?.addPayload("response", {
         ...response,
@@ -346,7 +370,8 @@ export class AliyunLlmClient {
       if (usage !== null) span?.setProviderUsage(usage);
       return content;
     } catch (error) {
-      span?.fail(error);
+      if (input.signal?.aborted) span?.cancel(error);
+      else span?.fail(error);
       throw error;
     } finally {
       span?.finish();

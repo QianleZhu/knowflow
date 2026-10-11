@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   ChevronDown,
   CircleDollarSign,
+  CircleStop,
   Clock3,
   LoaderCircle,
   Search,
@@ -217,10 +218,16 @@ export function TraceDetailsSheet({
                     "rounded-full px-2 py-0.5 font-medium",
                     trace.status === "completed"
                       ? "bg-success-bg text-success"
-                      : "bg-danger-bg text-danger",
+                      : trace.status === "cancelled"
+                        ? "bg-warning-bg text-warning"
+                        : "bg-danger-bg text-danger",
                   )}
                 >
-                  {trace.status === "completed" ? "已完成" : "运行失败"}
+                  {trace.status === "completed"
+                    ? "已完成"
+                    : trace.status === "cancelled"
+                      ? "已停止"
+                      : "运行失败"}
                 </span>
                 <span>{formatTimestamp(trace.createdAt)}</span>
                 <span>Trace ID：{trace.traceId}</span>
@@ -393,9 +400,12 @@ function SummaryMetric({
   );
 }
 
-// 用图标和颜色传达 Span 成功、失败或仍在运行的状态。
-function SpanStatus({ status }: { status: "running" | "completed" | "failed" }) {
+// 用图标和颜色传达 Span 成功、失败、取消或仍在运行的状态。
+function SpanStatus({ status }: { status: "running" | "completed" | "failed" | "cancelled" }) {
   if (status === "failed") return <AlertCircle className="mt-0.5 size-4 shrink-0 text-danger" />;
+  if (status === "cancelled") {
+    return <CircleStop className="mt-0.5 size-4 shrink-0 text-warning" />;
+  }
   if (status === "running") {
     return <LoaderCircle className="mt-0.5 size-4 shrink-0 animate-spin text-warning" />;
   }

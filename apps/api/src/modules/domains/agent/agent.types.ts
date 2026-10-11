@@ -61,6 +61,7 @@ export type AgentState = {
   steps: { name: string; status: "started" | "completed"; at: string }[];
   startedAt: number;
   error: string | null;
+  signal?: AbortSignal;
   emit: SseEmitter;
 };
 

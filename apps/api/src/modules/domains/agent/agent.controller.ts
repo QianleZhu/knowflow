@@ -50,6 +50,10 @@ type SseResponse = {
   setHeader: (name: string, value: string) => void;
   write: (chunk: string) => void;
   end: () => void;
+  on: (event: "close", listener: () => void) => SseResponse;
+  off: (event: "close", listener: () => void) => SseResponse;
+  writableEnded: boolean;
+  destroyed: boolean;
 };
 
 @Controller()
@@ -137,11 +141,7 @@ export class AgentController {
     @Req() request: AuthenticatedRequest,
   ): Promise<ApiSuccess<AgentTraceDetailResponse>> {
     const { id, traceId } = agentTraceRouteParamsSchema.parse(params);
-    const data = await this.agentService.getTraceDetail(
-      id,
-      traceId,
-      this.requireUser(request),
-    );
+    const data = await this.agentService.getTraceDetail(id, traceId, this.requireUser(request));
     return { ok: true, data: agentTraceDetailResponseSchema.parse(data) };
   }
 
@@ -162,6 +162,7 @@ export class AgentController {
     return { ok: true, data: agentTracePayloadResponseSchema.parse(data) };
   }
 
+  // 客户端断开 SSE 时中止 Agent 工作，并让服务层保存取消 Trace。
   @Post("conversations/:id/messages")
   async ask(
     @Param() params: unknown,
@@ -178,8 +179,20 @@ export class AgentController {
     response.setHeader("Cache-Control", "no-cache, no-transform");
     response.setHeader("Connection", "keep-alive");
 
+    const cancellation = new AbortController();
+    // 响应正常结束也会触发 close；只有未完成的响应才代表客户端提前断开。
+    const handleResponseClose = (): void => {
+      if (!response.writableEnded) cancellation.abort();
+    };
+    response.on("close", handleResponseClose);
+
     const writeEvent = (event: unknown): void => {
-      response.write(`data: ${JSON.stringify(event)}\n\n`);
+      if (cancellation.signal.aborted || response.destroyed || response.writableEnded) return;
+      try {
+        response.write(`data: ${JSON.stringify(event)}\n\n`);
+      } catch (error) {
+        cancellation.abort(error);
+      }
     };
 
     try {
@@ -187,15 +200,19 @@ export class AgentController {
         conversationId: id,
         content: input.content,
         user,
+        signal: cancellation.signal,
         emit: (event) => Promise.resolve(writeEvent(event)),
       });
     } catch (error) {
-      writeEvent({
-        type: "agent.failed",
-        message: error instanceof Error ? error.message : "Agent 请求失败",
-      });
+      if (!cancellation.signal.aborted) {
+        writeEvent({
+          type: "agent.failed",
+          message: error instanceof Error ? error.message : "Agent 请求失败",
+        });
+      }
     } finally {
-      response.end();
+      response.off("close", handleResponseClose);
+      if (!response.destroyed && !response.writableEnded) response.end();
     }
   }
 

@@ -21,6 +21,7 @@ export type QueryRewriteInput = {
   query: string;
   recentMessages: RecentConversationMessage[];
   conversationSummary: string | null;
+  signal?: AbortSignal | undefined;
 };
 
 export type QueryRewriteResult = {
@@ -96,6 +97,7 @@ export class QueryRewriteService {
         usageType: "query_understanding",
         temperature: 0,
         maxOutputTokens: 96,
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
         messages: [
           { role: "system", content: REWRITE_QUERY_PROMPT },
           { role: "user", content: JSON.stringify(this.buildContext(input)) },
@@ -103,7 +105,9 @@ export class QueryRewriteService {
       });
       return this.parseJson(raw, rewrittenQuerySchema).rewrittenQuery;
     } catch (error) {
-      this.logger.warn(`Query rewrite failed, falling back to original query: ${this.errorMessage(error)}`);
+      this.logger.warn(
+        `Query rewrite failed, falling back to original query: ${this.errorMessage(error)}`,
+      );
       return null;
     }
   }
@@ -115,6 +119,7 @@ export class QueryRewriteService {
         usageType: "query_understanding",
         temperature: 0,
         maxOutputTokens: 96,
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
         messages: [
           { role: "system", content: EXPAND_FTS_KEYWORDS_PROMPT },
           { role: "user", content: JSON.stringify(this.buildContext(input)) },
@@ -122,7 +127,9 @@ export class QueryRewriteService {
       });
       return this.normalizeKeywords(this.parseJson(raw, ftsKeywordsSchema).keywords);
     } catch (error) {
-      this.logger.warn(`FTS keyword expansion failed, falling back to original query: ${this.errorMessage(error)}`);
+      this.logger.warn(
+        `FTS keyword expansion failed, falling back to original query: ${this.errorMessage(error)}`,
+      );
       return [];
     }
   }
@@ -148,9 +155,7 @@ export class QueryRewriteService {
 
   // 解析模型可能返回的 JSON 代码块，并使用 Zod 严格校验输出结构。
   private parseJson<T>(raw: string, schema: z.ZodType<T>): T {
-    const normalized = raw
-      .replace(/^\s*```(?:json)?\s*/u, "")
-      .replace(/\s*```\s*$/u, "");
+    const normalized = raw.replace(/^\s*```(?:json)?\s*/u, "").replace(/\s*```\s*$/u, "");
     return schema.parse(JSON.parse(normalized));
   }
 

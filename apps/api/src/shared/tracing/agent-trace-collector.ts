@@ -8,7 +8,7 @@ export type AgentTraceSpanKind =
   | "embedding"
   | "rerank"
   | "retrieval";
-export type AgentTraceSpanStatus = "running" | "completed" | "failed";
+export type AgentTraceSpanStatus = "running" | "completed" | "failed" | "cancelled";
 export type AgentTraceUsageSource = "provider" | "unknown";
 
 export type AgentTracePriceSnapshot = {
@@ -125,9 +125,14 @@ export class AgentTraceSpanHandle {
     this.finish("failed", error);
   }
 
+  // 以取消状态结束调用，并保留取消原因供 Trace 时间线展示。
+  cancel(error: unknown): void {
+    this.finish("cancelled", error);
+  }
+
   // 完成 Span；重复结束不会覆盖第一次记录的结果。
   finish(status: AgentTraceSpanStatus = "completed", error?: unknown): void {
-    if (this.record.status !== "running" && status !== "failed") return;
+    if (this.record.status !== "running" && status !== "failed" && status !== "cancelled") return;
     const finishedAt = new Date();
     this.record.status = status;
     this.record.finishedAt = finishedAt;
@@ -228,6 +233,13 @@ export class AgentTraceCollector {
     this.root.finish(status, error);
   }
 
+  // 结束请求内仍在运行的 Span，避免取消 Trace 留下永久运行状态。
+  finishRunningSpans(status: "failed" | "cancelled", error: unknown): void {
+    for (const span of this.spans) {
+      if (span.record.status === "running") span.finish(status, error);
+    }
+  }
+
   // 将 Trace 写入节点标记为失败，避免事务回滚后仍显示为成功。
   failSpanByName(name: string, error: unknown): void {
     const span = [...this.spans].reverse().find((item) => item.record.name === name);
@@ -282,6 +294,7 @@ export function runWithAgentTraceCollector<T>(
 export async function withAgentTraceSpan<T>(input: {
   name: string;
   kind: AgentTraceSpanKind;
+  signal?: AbortSignal;
   operation: (span: AgentTraceSpanHandle | undefined) => Promise<T>;
 }): Promise<T> {
   const scope = getAgentTraceScope();
@@ -300,7 +313,8 @@ export async function withAgentTraceSpan<T>(input: {
         span.finish();
         return result;
       } catch (error) {
-        span.fail(error);
+        if (input.signal?.aborted) span.cancel(error);
+        else span.fail(error);
         throw error;
       }
     },

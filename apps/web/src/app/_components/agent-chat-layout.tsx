@@ -39,6 +39,7 @@ export type AgentChatLayoutProps = {
   chatHook: ReturnType<typeof useAgentChat>;
 };
 
+// 组合会话导航、聊天消息、运行记录与发送/停止输入区。
 export function AgentChatLayout({
   disableInput,
   isLoading,
@@ -82,32 +83,11 @@ export function AgentChatLayout({
     setCorrectionFor,
     listEndRef,
     ask,
+    stopGenerating,
     sendFeedback,
     regenerate,
     setError,
   } = chatHook;
-
-  // 仅在会话静止时加载 Trace 摘要；运行正文由详情抽屉在用户打开后再按 Span 获取。
-  useEffect(() => {
-    const controller = new AbortController();
-    setOpenedTraceId(null);
-    setTraceSummaries([]);
-    setTraceLoadError(null);
-    if (selectedConversationId === "" || isAsking) return () => controller.abort();
-
-    void apiRequest(
-      `/conversations/${selectedConversationId}/traces`,
-      agentTraceListResponseSchema,
-      { cache: "no-store", signal: controller.signal },
-    )
-      .then((response) => setTraceSummaries(response.items))
-      .catch((error: unknown) => {
-        if (!controller.signal.aborted) {
-          setTraceLoadError(error instanceof Error ? error.message : "加载运行记录失败");
-        }
-      });
-    return () => controller.abort();
-  }, [isAsking, selectedConversationId]);
 
   const traceByAnswerId = new Map(
     traceSummaries
@@ -121,6 +101,61 @@ export function AgentChatLayout({
       .filter((trace) => trace.messageId === null)
       .map((trace) => [trace.userMessageId, trace]),
   );
+
+  const latestAssistantMessage = [...messages]
+    .reverse()
+    .find((message) => message.role === "assistant");
+  const latestUserMessage = [...messages].reverse().find((message) => message.role === "user");
+  const cancelledUserMessageId =
+    latestAssistantMessage?.role === "assistant" &&
+    "completionState" in latestAssistantMessage &&
+    latestAssistantMessage.completionState === "cancelled" &&
+    latestAssistantMessage.conversationId === selectedConversationId &&
+    latestUserMessage?.conversationId === selectedConversationId &&
+    !latestUserMessage.id.startsWith("local-user-")
+      ? latestUserMessage.id
+      : null;
+
+  // 用户停止会先关闭 SSE，再由服务端写入 Trace；短暂重试以便停止后立即显示运行详情。
+  useEffect(() => {
+    const controller = new AbortController();
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let attempt = 0;
+    setOpenedTraceId(null);
+    setTraceSummaries([]);
+    setTraceLoadError(null);
+    if (selectedConversationId === "" || isAsking) return () => controller.abort();
+
+    // 加载会话运行记录，并在刚停止的请求尚未落库时短暂重试。
+    const loadTraceSummaries = async (): Promise<void> => {
+      try {
+        const response = await apiRequest(
+          `/conversations/${selectedConversationId}/traces`,
+          agentTraceListResponseSchema,
+          { cache: "no-store", signal: controller.signal },
+        );
+        if (controller.signal.aborted) return;
+        setTraceSummaries(response.items);
+        const cancelledTraceSaved =
+          cancelledUserMessageId === null ||
+          response.items.some((trace) => trace.userMessageId === cancelledUserMessageId);
+        if (!cancelledTraceSaved && attempt < 5) {
+          attempt += 1;
+          retryTimer = setTimeout(() => void loadTraceSummaries(), 300);
+        }
+      } catch (error: unknown) {
+        if (!controller.signal.aborted) {
+          setTraceLoadError(error instanceof Error ? error.message : "加载运行记录失败");
+        }
+      }
+    };
+
+    void loadTraceSummaries();
+    return () => {
+      controller.abort();
+      if (retryTimer !== null) clearTimeout(retryTimer);
+    };
+  }, [cancelledUserMessageId, isAsking, selectedConversationId]);
 
   async function handleArchive(e: React.MouseEvent, id: string) {
     e.stopPropagation();
@@ -370,14 +405,19 @@ export function AgentChatLayout({
               disabled={disableInput}
               className="max-h-40 min-h-11 flex-1 resize-none rounded-lg border border-border bg-neutral-0 px-3 py-2.5 text-base text-ink placeholder:text-ink-subtle hover:border-neutral-300 focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/20 disabled:bg-neutral-100"
             />
-            <Button
-              type="submit"
-              size="lg"
-              loading={isAsking}
-              disabled={(disableInput ?? false) || question.trim() === ""}
-            >
-              发送
-            </Button>
+            {isAsking ? (
+              <Button type="button" size="lg" variant="secondary" onClick={stopGenerating}>
+                停止生成
+              </Button>
+            ) : (
+              <Button
+                type="submit"
+                size="lg"
+                disabled={(disableInput ?? false) || question.trim() === ""}
+              >
+                发送
+              </Button>
+            )}
           </form>
         </div>
 

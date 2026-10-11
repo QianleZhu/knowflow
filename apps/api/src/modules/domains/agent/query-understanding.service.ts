@@ -90,7 +90,7 @@ export class QueryUnderstandingService {
   // 规则先处理确定的元问题和纯闲聊，其余只由检索决策模型判断是否需要检索。
   async understand(
     input: QueryUnderstandingInput,
-    options: { mode?: "rules" | "llm_only" } = {},
+    options: { mode?: "rules" | "llm_only"; signal?: AbortSignal | undefined } = {},
   ): Promise<QueryPlan> {
     const started = Date.now();
     const mode = options.mode ?? "rules";
@@ -122,6 +122,7 @@ export class QueryUnderstandingService {
         usageType: "query_understanding",
         temperature: 0,
         maxOutputTokens: 32,
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
         messages: [
           { role: "system", content: RETRIEVAL_DECISION_PROMPT },
           // 示例只展示企业问题的检索判断，不让路由模型学习查询改写或选库。

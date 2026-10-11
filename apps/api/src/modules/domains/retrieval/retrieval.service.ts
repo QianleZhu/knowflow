@@ -98,6 +98,7 @@ export class RetrievalService {
     rewrittenQueries?: string[];
     expandedKeywords?: string[];
     allowedKnowledgeBaseIds: string[];
+    signal?: AbortSignal | undefined;
   }): Promise<RetrievalResult> {
     // 语义检索使用原文和独立改写，全文检索使用原文和关键词扩展，两个查询集合保持职责隔离。
     const rewrittenQueries = this.uniqueNonEmpty(input.rewrittenQueries ?? []);
@@ -137,7 +138,9 @@ export class RetrievalService {
     }
 
     // 向量与知识条目共用查询向量；全文召回独立运行，避免 embedding 故障阻断 FTS。
-    const queryEmbeddingsPromise = Promise.resolve().then(() => this.llm.embedTexts(vectorQueries));
+    const queryEmbeddingsPromise = Promise.resolve().then(() =>
+      this.llm.embedTexts(vectorQueries, input.signal),
+    );
     let vectorRawResults: { query: string; rows: DocumentRecallRow[] }[] = [];
     let knowledgeItemRawResults: { query: string; rows: KnowledgeItemRecallRow[] }[] = [];
     const [vectorResult, ftsResult, knowledgeItemResult] = await Promise.all([

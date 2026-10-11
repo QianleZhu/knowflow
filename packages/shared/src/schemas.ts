@@ -745,16 +745,18 @@ export const managedAgentSchema = agentSchema.extend({
 const recommendedQuestionsInputSchema = z.array(z.string().trim().min(1).max(200)).max(5);
 
 // Agent 可编辑字段不包含模型选择，模型用途由 API 服务端内部映射。
-export const createManagedAgentRequestSchema = z.object({
-  name: z.string().trim().min(1).max(160),
-  description: z.string().trim().max(2000).nullable().optional(),
-  systemPrompt: z.string().trim().min(1).max(8000).optional(),
-  openingMessage: z.string().trim().max(1000).nullable().optional(),
-  recommendedQuestions: recommendedQuestionsInputSchema.optional(),
-  answerStyle: z.string().trim().max(80).nullable().optional(),
-  allowAttachments: z.boolean().optional(),
-  visibility: z.literal("knowledge_base_members").optional(),
-}).strict();
+export const createManagedAgentRequestSchema = z
+  .object({
+    name: z.string().trim().min(1).max(160),
+    description: z.string().trim().max(2000).nullable().optional(),
+    systemPrompt: z.string().trim().min(1).max(8000).optional(),
+    openingMessage: z.string().trim().max(1000).nullable().optional(),
+    recommendedQuestions: recommendedQuestionsInputSchema.optional(),
+    answerStyle: z.string().trim().max(80).nullable().optional(),
+    allowAttachments: z.boolean().optional(),
+    visibility: z.literal("knowledge_base_members").optional(),
+  })
+  .strict();
 
 export const updateManagedAgentRequestSchema = createManagedAgentRequestSchema
   .partial()
@@ -830,7 +832,7 @@ export const conversationMessagesResponseSchema = z.object({
 });
 
 // Agent 单次运行 Trace 的轻量列表、详情和延迟载荷读取契约。
-export const agentTraceStatusSchema = z.enum(["completed", "failed"]);
+export const agentTraceStatusSchema = z.enum(["completed", "failed", "cancelled"]);
 export const agentTraceUsageSourceSchema = z.enum(["provider", "unknown"]);
 
 export const agentTraceSummarySchema = z.object({
@@ -872,7 +874,7 @@ export const agentTraceSpanSchema = z.object({
   sequence: z.number().int().nonnegative(),
   name: z.string(),
   kind: z.string(),
-  status: z.enum(["running", "completed", "failed"]),
+  status: z.enum(["running", "completed", "failed", "cancelled"]),
   startedAt: z.iso.datetime(),
   finishedAt: z.iso.datetime().nullable(),
   durationMs: z.number().int().nonnegative().nullable(),
