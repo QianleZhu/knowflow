@@ -240,7 +240,7 @@ export function useAgentChat({
         content: trimmed,
         confidenceLevel: null,
         noAnswerType: null,
-        citations: [],
+        sources: [],
         recommendedQuestions: [],
         createdAt: now,
       };
@@ -250,6 +250,7 @@ export function useAgentChat({
         role: "assistant",
         content: "",
         noAnswerType: null,
+        sources: [],
         recommendedQuestions: [],
         createdAt: now,
       };

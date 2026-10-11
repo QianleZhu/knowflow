@@ -11,7 +11,6 @@ import {
   knowledgeItemFeedback,
   knowledgeItems,
   knowledgeBases,
-  messageCitations,
   users,
 } from "@knowflow/db";
 import type {
@@ -442,46 +441,27 @@ export class AnalyticsService {
       eq(analyticsEvents.targetType, "document"),
       isNotNull(analyticsEvents.targetId),
     ];
-    const citationConditions = [
-      this.createdAtRangeCondition(messageCitations.createdAt, range),
-      isNotNull(messageCitations.documentId),
-    ];
     if (knowledgeBaseId !== undefined) {
       viewConditions.push(eq(analyticsEvents.knowledgeBaseId, knowledgeBaseId));
-      citationConditions.push(eq(messageCitations.knowledgeBaseId, knowledgeBaseId));
     }
 
-    const [viewRows, citationRows] = await Promise.all([
-      db
-        .select({
-          id: analyticsEvents.targetId,
-          value: sql<number>`count(*)::int`,
-          lastViewedAt: lastViewedAtExpression,
-        })
-        .from(analyticsEvents)
-        .where(and(...viewConditions))
-        .groupBy(analyticsEvents.targetId)
-        .orderBy(desc(sql`count(*)`))
-        .limit(10),
-      db
-        .select({
-          id: messageCitations.documentId,
-          value: sql<number>`count(*)::int`,
-        })
-        .from(messageCitations)
-        .where(and(...citationConditions))
-        .groupBy(messageCitations.documentId)
-        .orderBy(desc(sql`count(*)`))
-        .limit(10),
-    ]);
+    const viewRows = await db
+      .select({
+        id: analyticsEvents.targetId,
+        value: sql<number>`count(*)::int`,
+        lastViewedAt: lastViewedAtExpression,
+      })
+      .from(analyticsEvents)
+      .where(and(...viewConditions))
+      .groupBy(analyticsEvents.targetId)
+      .orderBy(desc(sql`count(*)`))
+      .limit(10);
 
     const views = this.toCountMap(viewRows);
     const lastViewedAt = this.toLastViewedMap(viewRows);
-    const citations = this.toCountMap(citationRows);
     return this.hydrateDocuments(
-      [...new Set([...views.keys(), ...citations.keys()])],
+      [...views.keys()],
       views,
-      citations,
       lastViewedAt,
       knowledgeBaseId,
     );
@@ -498,46 +478,27 @@ export class AnalyticsService {
       eq(analyticsEvents.targetType, "knowledge_item"),
       isNotNull(analyticsEvents.targetId),
     ];
-    const citationConditions = [
-      this.createdAtRangeCondition(messageCitations.createdAt, range),
-      isNotNull(messageCitations.knowledgeItemId),
-    ];
     if (knowledgeBaseId !== undefined) {
       viewConditions.push(eq(analyticsEvents.knowledgeBaseId, knowledgeBaseId));
-      citationConditions.push(eq(messageCitations.knowledgeBaseId, knowledgeBaseId));
     }
 
-    const [viewRows, citationRows] = await Promise.all([
-      db
-        .select({
-          id: analyticsEvents.targetId,
-          value: sql<number>`count(*)::int`,
-          lastViewedAt: lastViewedAtExpression,
-        })
-        .from(analyticsEvents)
-        .where(and(...viewConditions))
-        .groupBy(analyticsEvents.targetId)
-        .orderBy(desc(sql`count(*)`))
-        .limit(10),
-      db
-        .select({
-          id: messageCitations.knowledgeItemId,
-          value: sql<number>`count(*)::int`,
-        })
-        .from(messageCitations)
-        .where(and(...citationConditions))
-        .groupBy(messageCitations.knowledgeItemId)
-        .orderBy(desc(sql`count(*)`))
-        .limit(10),
-    ]);
+    const viewRows = await db
+      .select({
+        id: analyticsEvents.targetId,
+        value: sql<number>`count(*)::int`,
+        lastViewedAt: lastViewedAtExpression,
+      })
+      .from(analyticsEvents)
+      .where(and(...viewConditions))
+      .groupBy(analyticsEvents.targetId)
+      .orderBy(desc(sql`count(*)`))
+      .limit(10);
 
     const views = this.toCountMap(viewRows);
     const lastViewedAt = this.toLastViewedMap(viewRows);
-    const citations = this.toCountMap(citationRows);
     return this.hydrateKnowledgeItems(
-      [...new Set([...views.keys(), ...citations.keys()])],
+      [...views.keys()],
       views,
-      citations,
       lastViewedAt,
       knowledgeBaseId,
     );
@@ -603,7 +564,6 @@ export class AnalyticsService {
   private async hydrateDocuments(
     ids: string[],
     views: Map<string, number>,
-    citations: Map<string, number>,
     lastViewedAt: Map<string, Date | string | null>,
     knowledgeBaseId?: string,
   ): Promise<TopContent[]> {
@@ -630,17 +590,15 @@ export class AnalyticsService {
         title: row.title,
         knowledgeBaseName: row.knowledgeBaseName,
         views: views.get(row.id) ?? 0,
-        citations: citations.get(row.id) ?? 0,
         lastViewedAt: this.toIsoDateTime(lastViewedAt.get(row.id) ?? null),
       }))
-      .sort((a, b) => b.views + b.citations - (a.views + a.citations))
+      .sort((a, b) => b.views - a.views)
       .slice(0, 5);
   }
 
   private async hydrateKnowledgeItems(
     ids: string[],
     views: Map<string, number>,
-    citations: Map<string, number>,
     lastViewedAt: Map<string, Date | string | null>,
     knowledgeBaseId?: string,
   ): Promise<TopContent[]> {
@@ -667,10 +625,9 @@ export class AnalyticsService {
         title: row.title,
         knowledgeBaseName: row.knowledgeBaseName,
         views: views.get(row.id) ?? 0,
-        citations: citations.get(row.id) ?? 0,
         lastViewedAt: this.toIsoDateTime(lastViewedAt.get(row.id) ?? null),
       }))
-      .sort((a, b) => b.views + b.citations - (a.views + a.citations))
+      .sort((a, b) => b.views - a.views)
       .slice(0, 5);
   }
 

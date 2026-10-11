@@ -122,11 +122,6 @@ export const noAnswerTypeEnum = pgEnum("no_answer_type", [
   "permission_limited",
   "attachment_parse_failed",
 ]);
-export const citationSourceTypeEnum = pgEnum("citation_source_type", [
-  "knowledge_document",
-  "knowledge_item",
-  "conversation_attachment",
-]);
 export const feedbackRatingEnum = pgEnum("feedback_rating", ["useful", "not_useful", "correction"]);
 export const knowledgeItemFeedbackRatingEnum = pgEnum("knowledge_item_feedback_rating", [
   "like",
@@ -164,7 +159,6 @@ export const analyticsEventTypeEnum = pgEnum("analytics_event_type", [
   "question_asked",
   "answer_generated",
   "agent_called",
-  "citation_clicked",
   "feedback_submitted",
   "attachment_ingestion_requested",
 ]);
@@ -175,7 +169,6 @@ export const analyticsTargetTypeEnum = pgEnum("analytics_target_type", [
   "agent",
   "message",
   "conversation",
-  "citation",
   "attachment",
 ]);
 export const backgroundJobStatusEnum = pgEnum("background_job_status", [
@@ -544,7 +537,6 @@ export const knowledgeItems = pgTable(
     verifiedBy: uuid("verified_by").references(() => users.id),
     verifiedAt: timestamp("verified_at", { withTimezone: true }),
     viewCount: integer("view_count").default(0).notNull(),
-    citeCount: integer("cite_count").default(0).notNull(),
     likeCount: integer("like_count").default(0).notNull(),
     dislikeCount: integer("dislike_count").default(0).notNull(),
     enabled: boolean("enabled").default(true).notNull(),
@@ -705,7 +697,6 @@ export const agents = pgTable(
     answerStyle: varchar("answer_style", { length: 80 }),
     fallbackStrategy: text("fallback_strategy"),
     allowAttachments: boolean("allow_attachments").default(true).notNull(),
-    forceCitation: boolean("force_citation").default(true).notNull(),
     visibility: agentVisibilityEnum("visibility").notNull(),
     status: agentStatusEnum("status").default("draft").notNull(),
     isDefault: boolean("is_default").default(false).notNull(),
@@ -776,33 +767,6 @@ export const conversationMessages = pgTable(
     ...createdOnly(),
   },
   (table) => [index("conversation_messages_conversation_idx").on(table.conversationId)],
-);
-
-export const messageCitations = pgTable(
-  "message_citations",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    messageId: uuid("message_id")
-      .notNull()
-      .references(() => conversationMessages.id),
-    sourceType: citationSourceTypeEnum("source_type").notNull(),
-    knowledgeBaseId: uuid("knowledge_base_id").references(() => knowledgeBases.id),
-    documentId: uuid("document_id").references(() => documents.id, { onDelete: "set null" }),
-    knowledgeItemId: uuid("knowledge_item_id").references(() => knowledgeItems.id, {
-      onDelete: "set null",
-    }),
-    attachmentId: uuid("attachment_id"),
-    chunkId: uuid("chunk_id"),
-    title: varchar("title", { length: 255 }).notNull(),
-    snippet: text("snippet"),
-    pageOrSection: varchar("page_or_section", { length: 120 }),
-    ...createdOnly(),
-  },
-  (table) => [
-    index("message_citations_message_idx").on(table.messageId),
-    index("message_citations_document_idx").on(table.documentId),
-    index("message_citations_knowledge_item_idx").on(table.knowledgeItemId),
-  ],
 );
 
 export const answerFeedback = pgTable(
@@ -879,7 +843,6 @@ export const agentRuntimeTraces = pgTable(
     retrievedContext: jsonb("retrieved_context").default([]).notNull(),
     promptSnapshot: text("prompt_snapshot"),
     modelConfig: jsonb("model_config").default({}).notNull(),
-    citations: jsonb("citations").default([]).notNull(),
     confidenceLevel: confidenceLevelEnum("confidence_level"),
     noAnswerType: noAnswerTypeEnum("no_answer_type"),
     status: varchar("status", { length: 24 }).default("completed").notNull(),

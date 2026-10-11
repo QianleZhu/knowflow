@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 
 import { NotFoundException } from "@nestjs/common";
 import { agentKnowledgeBases, agents, conversations, db, knowledgeBases } from "@knowflow/db";
-import type { ConversationListQuery } from "@knowflow/shared";
+import type { ConversationListQuery, ConversationSource } from "@knowflow/shared";
 import { and, eq, type SQL } from "drizzle-orm";
 
 import type { AuthenticatedUser } from "../auth/auth.types.js";
@@ -63,6 +63,7 @@ type UpdateRecord = {
 
 type AgentServiceGenerationInternals = {
   generateAnswerStream: (state: AgentState) => Promise<AgentState>;
+  toConversationSources: (value: unknown) => ConversationSource[];
 };
 
 type AgentServiceQueueInternals = {
@@ -520,6 +521,32 @@ function makeConversationRow(overrides: Partial<ConversationRow> = {}): Conversa
 }
 
 void describe("AgentService conversation memory answer generation", () => {
+  void it("maps persisted parent heading metadata into source cards", () => {
+    const service = serviceWithGeneration(makeLlmStub("unused"));
+
+    assert.deepEqual(
+      service.toConversationSources([
+        {
+          id: "00000000-0000-0000-0000-000000000601",
+          parentChunkId: "00000000-0000-0000-0000-000000000601",
+          sourceType: "knowledge_document",
+          title: "员工手册",
+          knowledgeBaseName: "人事制度",
+          headingPath: ["考勤管理", "请假申请"],
+        },
+      ]),
+      [
+        {
+          id: "00000000-0000-0000-0000-000000000601",
+          sourceType: "knowledge_document",
+          title: "员工手册",
+          knowledgeBaseName: "人事制度",
+          headingPath: ["考勤管理", "请假申请"],
+        },
+      ],
+    );
+  });
+
   void it("returns the decision model answer without invoking the answer model", async () => {
     const llm = makeLlmStub("must not generate again");
     const service = serviceWithGeneration(llm);
@@ -530,7 +557,6 @@ void describe("AgentService conversation memory answer generation", () => {
     const result = await service.generateAnswerStream(state);
     assert.equal(result.answer, state.queryPlan.answer);
     assert.equal(llm.streamedMessages.length, 0);
-    assert.deepEqual(result.citations, []);
     assert.equal(result.confidenceLevel, null);
     assert.equal(result.noAnswerType, null);
   });
@@ -626,7 +652,6 @@ void describe("AgentService query routing integration", () => {
     assert.deepEqual(order, ["memory", "analysis"]);
     assert.equal(result.state.confidenceLevel, null);
     assert.equal(result.state.noAnswerType, null);
-    assert.deepEqual(result.state.citations, []);
     assert.ok(result.state.answer.includes("知识库"));
   });
 
@@ -903,7 +928,6 @@ function makeGenerationState(
     },
     promptSnapshot: "system prompt",
     answer: "",
-    citations: [],
     confidenceLevel: null,
     noAnswerType: null,
     assistantMessage: null,
@@ -942,7 +966,6 @@ function makeRetrievalContext(
     knowledgeItemVerified: false,
     sourceExpired: false,
     contextText: "Context",
-    citationIndex: 1,
     ...overrides,
   };
 }

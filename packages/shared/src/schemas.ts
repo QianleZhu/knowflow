@@ -12,7 +12,6 @@ import {
   AGENT_STATUSES,
   AGENT_TYPES,
   AGENT_VISIBILITIES,
-  CITATION_SOURCE_TYPES,
   CONFIDENCE_LEVELS,
   FEEDBACK_RATINGS,
   KNOWLEDGE_BASE_INDEX_STATUSES,
@@ -48,7 +47,6 @@ export const agentVisibilitySchema = z.enum(AGENT_VISIBILITIES);
 export const agentStatusSchema = z.enum(AGENT_STATUSES);
 export const confidenceLevelSchema = z.enum(CONFIDENCE_LEVELS);
 export const noAnswerTypeSchema = z.enum(NO_ANSWER_TYPES);
-export const citationSourceTypeSchema = z.enum(CITATION_SOURCE_TYPES);
 export const feedbackRatingSchema = z.enum(FEEDBACK_RATINGS);
 export const improvementTriggerTypeSchema = z.enum(IMPROVEMENT_TRIGGER_TYPES);
 export const improvementTaskStatusSchema = z.enum(IMPROVEMENT_TASK_STATUSES);
@@ -476,7 +474,6 @@ export const knowledgeItemSchema = z.object({
   metadata: z.record(z.string(), z.unknown()),
   enabled: z.boolean(),
   viewCount: z.number().int().nonnegative(),
-  citeCount: z.number().int().nonnegative(),
   likeCount: z.number().int().nonnegative(),
   dislikeCount: z.number().int().nonnegative(),
   userFeedback: knowledgeItemFeedbackRatingSchema.nullable(),
@@ -735,7 +732,6 @@ export const managedAgentSchema = agentSchema.extend({
   systemPrompt: z.string().nullable(),
   answerStyle: z.string().nullable(),
   allowAttachments: z.boolean(),
-  forceCitation: z.boolean(),
   createdBy: z.uuid(),
   publishedAt: z.iso.datetime().nullable(),
   createdAt: z.iso.datetime(),
@@ -801,18 +797,13 @@ export const createConversationRequestSchema = z.object({
   title: z.string().trim().min(1).max(255).optional(),
 });
 
-export const citationSchema = z.object({
-  id: z.uuid().optional(),
-  sourceType: citationSourceTypeSchema,
-  sourceId: z.uuid().nullable(),
-  knowledgeBaseId: z.uuid().nullable(),
-  knowledgeBaseName: z.string().nullable(),
-  documentId: z.uuid().nullable(),
-  knowledgeItemId: z.uuid().nullable(),
-  chunkId: z.uuid().nullable(),
+// 回答来源卡片直接展示父块检索元数据。
+export const conversationSourceSchema = z.object({
+  id: z.uuid(),
+  sourceType: z.enum(["knowledge_document", "knowledge_item"]),
   title: z.string(),
-  snippet: z.string().nullable(),
-  pageOrSection: z.string().nullable(),
+  knowledgeBaseName: z.string(),
+  headingPath: z.array(z.string()),
 });
 
 export const conversationMessageSchema = z.object({
@@ -822,7 +813,7 @@ export const conversationMessageSchema = z.object({
   content: z.string(),
   confidenceLevel: confidenceLevelSchema.nullable(),
   noAnswerType: noAnswerTypeSchema.nullable(),
-  citations: z.array(citationSchema),
+  sources: z.array(conversationSourceSchema),
   recommendedQuestions: z.array(z.string()),
   createdAt: z.iso.datetime(),
 });
@@ -1001,7 +992,6 @@ export const analyticsTopContentSchema = z.object({
   id: z.uuid(),
   title: z.string(),
   views: z.number().int().nonnegative(),
-  citations: z.number().int().nonnegative(),
   lastViewedAt: z.iso.datetime().nullable(),
 });
 
@@ -1224,9 +1214,8 @@ export type Conversation = z.infer<typeof conversationSchema>;
 export type ConversationListQuery = z.infer<typeof conversationListQuerySchema>;
 export type ConversationListResponse = z.infer<typeof conversationListResponseSchema>;
 export type CreateConversationRequest = z.infer<typeof createConversationRequestSchema>;
-export type Citation = z.infer<typeof citationSchema>;
-
 export type ConversationMessage = z.infer<typeof conversationMessageSchema>;
+export type ConversationSource = z.infer<typeof conversationSourceSchema>;
 export type ConversationMessagesResponse = z.infer<typeof conversationMessagesResponseSchema>;
 export type AgentTraceSummary = z.infer<typeof agentTraceSummarySchema>;
 export type AgentTraceListResponse = z.infer<typeof agentTraceListResponseSchema>;

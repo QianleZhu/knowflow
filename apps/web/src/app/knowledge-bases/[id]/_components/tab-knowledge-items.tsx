@@ -411,7 +411,6 @@ export function TabKnowledgeItems({ knowledgeBaseId, canManage }: TabKnowledgeIt
               <TableHeaderCell>标签</TableHeaderCell>
               <TableHeaderCell>状态</TableHeaderCell>
               <TableHeaderCell>启用</TableHeaderCell>
-              <TableHeaderCell>引用</TableHeaderCell>
               <TableHeaderCell>反馈</TableHeaderCell>
               <TableHeaderCell>更新时间</TableHeaderCell>
               {canManage ? <TableHeaderCell className="text-right">操作</TableHeaderCell> : null}
@@ -490,7 +489,6 @@ export function TabKnowledgeItems({ knowledgeBaseId, canManage }: TabKnowledgeIt
                     <span className="text-sm">{item.enabled ? "是" : "否"}</span>
                   )}
                 </TableCell>
-                <TableCell className="text-ink-muted tabular-nums">{item.citeCount}</TableCell>
                 <TableCell>
                   <div className="flex items-center gap-1">
                     <button

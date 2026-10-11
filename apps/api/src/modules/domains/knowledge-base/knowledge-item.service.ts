@@ -11,7 +11,6 @@ import {
   documents,
   knowledgeBases,
   knowledgeImprovementTasks,
-  messageCitations,
   knowledgeItemFeedback,
   knowledgeItemTags,
   knowledgeItems,
@@ -69,7 +68,6 @@ type KnowledgeItemRow = {
   metadata: unknown;
   enabled: boolean;
   viewCount: number;
-  citeCount: number;
   likeCount: number;
   dislikeCount: number;
   userFeedback: KnowledgeItem["userFeedback"];
@@ -421,10 +419,6 @@ export class KnowledgeItemService {
 
     await db.transaction(async (tx) => {
       await tx
-        .update(messageCitations)
-        .set({ knowledgeItemId: null })
-        .where(eq(messageCitations.knowledgeItemId, id));
-      await tx
         .delete(knowledgeImprovementTasks)
         .where(eq(knowledgeImprovementTasks.publishedItemId, id));
       await tx.delete(knowledgeItemFeedback).where(eq(knowledgeItemFeedback.knowledgeItemId, id));
@@ -639,7 +633,6 @@ export class KnowledgeItemService {
       metadata: knowledgeItems.metadata,
       enabled: knowledgeItems.enabled,
       viewCount: knowledgeItems.viewCount,
-      citeCount: knowledgeItems.citeCount,
       likeCount: knowledgeItems.likeCount,
       dislikeCount: knowledgeItems.dislikeCount,
       userFeedback: knowledgeItemFeedback.rating,
@@ -731,7 +724,6 @@ export class KnowledgeItemService {
           : {},
       enabled: row.enabled,
       viewCount: row.viewCount,
-      citeCount: row.citeCount,
       likeCount: row.likeCount,
       dislikeCount: row.dislikeCount,
       userFeedback: row.userFeedback,

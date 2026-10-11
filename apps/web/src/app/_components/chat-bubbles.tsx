@@ -1,4 +1,12 @@
-import { HelpCircle, AlertTriangle, Compass, ShieldAlert, AlertCircle, Bot } from "lucide-react";
+import {
+  HelpCircle,
+  AlertTriangle,
+  Compass,
+  ShieldAlert,
+  AlertCircle,
+  Bot,
+  BookOpenText,
+} from "lucide-react";
 import { code } from "@streamdown/code";
 import { createMathPlugin } from "@streamdown/math";
 import { Streamdown, type Components, defaultUrlTransform } from "streamdown";
@@ -127,6 +135,7 @@ export type DraftAssistantMessage = {
   role: "assistant";
   content: string;
   noAnswerType: NoAnswerType | null;
+  sources: ConversationMessage["sources"];
   recommendedQuestions: string[];
   createdAt: string;
   completionState?: "cancelled" | "failed";
@@ -290,6 +299,44 @@ export function AssistantBubble({
             </div>
           )}
 
+          {/* 答案下方展示实际进入模型上下文的父块标题路径。 */}
+          {!showSkeleton && !isPartialAnswer && message.sources.length > 0 ? (
+            <section className="mt-4" aria-label="回答来源">
+              <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-ink-subtle">
+                参考来源
+              </h3>
+              <ul className="grid gap-2 sm:grid-cols-2">
+                {message.sources.map((source) => (
+                  <li
+                    key={source.id}
+                    className="min-w-0 rounded-lg border border-border bg-neutral-0 px-3 py-2.5"
+                  >
+                    <div className="flex min-w-0 items-start gap-2">
+                      <BookOpenText
+                        className="mt-0.5 size-4 shrink-0 text-brand-600"
+                        aria-hidden
+                      />
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-medium text-ink">{source.title}</p>
+                        <p className="mt-0.5 truncate text-xs text-ink-subtle">
+                          {source.knowledgeBaseName}
+                          {source.sourceType === "knowledge_item" ? " · 知识条目" : " · 文档"}
+                        </p>
+                        <p className="mt-1 break-words text-xs leading-relaxed text-ink-muted">
+                          {source.headingPath.length > 0
+                            ? source.headingPath.join(" › ")
+                            : source.sourceType === "knowledge_item"
+                              ? "知识条目正文"
+                              : "未标注标题路径"}
+                        </p>
+                      </div>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
+
           {isPartialAnswer ? (
             <p className="mt-2 text-xs text-warning" role="status">
               {message.completionState === "cancelled"
@@ -427,7 +474,7 @@ export function CorrectionDialog({
           />
         </label>
         <label className="flex flex-col gap-1.5">
-          <span className="text-sm font-medium text-ink">应该引用哪份资料(可选)</span>
+          <span className="text-sm font-medium text-ink">相关资料在哪里(可选)</span>
           <input
             value={source}
             onChange={(e) => setSource(e.target.value)}

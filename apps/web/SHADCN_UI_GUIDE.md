@@ -39,7 +39,6 @@
 
 - `feedback`
 - `metric-card`
-- `citation-popover`
 
 `empty` 组件未安装；继续使用现有 `feedback.tsx` 里的 `EmptyState`。
 

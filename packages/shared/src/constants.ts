@@ -173,12 +173,6 @@ export const NO_ANSWER_TYPES = [
   "attachment_parse_failed",
 ] as const;
 
-export const CITATION_SOURCE_TYPES = [
-  "knowledge_document",
-  "knowledge_item",
-  "conversation_attachment",
-] as const;
-
 export const FEEDBACK_RATINGS = ["useful", "not_useful", "correction"] as const;
 
 export const IMPROVEMENT_TRIGGER_TYPES = [
@@ -211,7 +205,6 @@ export const ANALYTICS_EVENT_TYPES = [
   "question_asked",
   "answer_generated",
   "agent_called",
-  "citation_clicked",
   "feedback_submitted",
   "attachment_ingestion_requested",
 ] as const;
@@ -223,6 +216,5 @@ export const ANALYTICS_TARGET_TYPES = [
   "agent",
   "message",
   "conversation",
-  "citation",
   "attachment",
 ] as const;

@@ -17,7 +17,6 @@ import {
   documents,
   knowledgeImprovementTasks,
   knowledgeBases,
-  messageCitations,
   parentChunks,
 } from "@knowflow/db";
 import type {
@@ -103,7 +102,6 @@ export class AgentManagementService {
           recommendedQuestions: input.recommendedQuestions ?? [],
           answerStyle: input.answerStyle ?? null,
           allowAttachments: input.allowAttachments ?? true,
-          forceCitation: true,
           visibility: "knowledge_base_members",
           status: "draft",
           isDefault: false,
@@ -219,7 +217,7 @@ export class AgentManagementService {
     }
     const [updated] = await db
       .update(agents)
-      .set({ ...values, forceCitation: true, updatedAt: new Date() })
+      .set({ ...values, updatedAt: new Date() })
       .where(eq(agents.id, agent.id))
       .returning();
     if (updated === undefined) {
@@ -237,7 +235,6 @@ export class AgentManagementService {
       .update(agents)
       .set({
         status: "published",
-        forceCitation: true,
         publishedAt: new Date(),
         updatedAt: new Date(),
       })
@@ -311,7 +308,6 @@ export class AgentManagementService {
         .set({ agentId: null })
         .where(eq(analyticsEvents.agentId, agent.id));
       if (messageIds.length > 0) {
-        await tx.delete(messageCitations).where(inArray(messageCitations.messageId, messageIds));
         await tx.delete(answerFeedback).where(inArray(answerFeedback.messageId, messageIds));
         await tx.delete(conversationMessages).where(inArray(conversationMessages.id, messageIds));
       }
@@ -538,7 +534,6 @@ export class AgentManagementService {
       systemPrompt: agent.systemPrompt,
       answerStyle: agent.answerStyle,
       allowAttachments: agent.allowAttachments,
-      forceCitation: agent.forceCitation,
       createdBy: agent.createdBy,
       publishedAt: agent.publishedAt?.toISOString() ?? null,
       createdAt: agent.createdAt.toISOString(),

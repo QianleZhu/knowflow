@@ -79,7 +79,6 @@ type KnowledgeItemRecallRow = {
   verifiedAt: Date | null;
   status: "draft" | "pending_review" | "published" | "unpublished" | "expired" | "archived";
   viewCount: number;
-  citeCount: number;
   likeCount: number;
   createdAt: Date;
   score: number;
@@ -452,7 +451,6 @@ export class RetrievalService {
       verifiedAt: knowledgeItems.verifiedAt,
       status: knowledgeItems.status,
       viewCount: knowledgeItems.viewCount,
-      citeCount: knowledgeItems.citeCount,
       likeCount: knowledgeItems.likeCount,
       createdAt: knowledgeItems.createdAt,
       score,

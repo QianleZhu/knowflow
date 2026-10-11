@@ -82,7 +82,6 @@ type KnowledgeItemRow = {
   metadata: unknown;
   enabled: boolean;
   viewCount: number;
-  citeCount: number;
   likeCount: number;
   dislikeCount: number;
   userFeedback: KnowledgeItem["userFeedback"];
@@ -426,7 +425,6 @@ function makeKnowledgeItemRow(overrides: Partial<KnowledgeItemRow> = {}): Knowle
     metadata: {},
     enabled: true,
     viewCount: 0,
-    citeCount: 0,
     likeCount: 0,
     dislikeCount: 0,
     userFeedback: null,
@@ -453,7 +451,6 @@ function makeKnowledgeItem(row: KnowledgeItemRow): KnowledgeItem {
     metadata: {},
     enabled: row.enabled,
     viewCount: row.viewCount,
-    citeCount: row.citeCount,
     likeCount: row.likeCount,
     dislikeCount: row.dislikeCount,
     userFeedback: row.userFeedback,

@@ -1,7 +1,6 @@
 import type {
   Agent,
   AskStreamEvent,
-  Citation,
   ConfidenceLevel,
   Conversation,
   ConversationMessage,
@@ -54,7 +53,6 @@ export type AgentState = {
   contextTokenBudget?: ContextTokenBudgetTrace | null;
   actualTokenUsage?: ChatTokenUsage | null;
   answer: string;
-  citations: Citation[];
   confidenceLevel: ConfidenceLevel | null;
   noAnswerType: NoAnswerType | null;
   assistantMessage: ConversationMessage | null;

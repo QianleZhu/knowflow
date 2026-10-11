@@ -105,7 +105,7 @@ export function TabAnalytics({ knowledgeBaseId }: TabAnalyticsProps) {
     return [...data.popularDocuments]
       .sort((a, b) => b.views - a.views)
       .slice(0, 8)
-      .map((doc) => ({ name: truncate(doc.title, 14), 浏览: doc.views, 引用: doc.citations }));
+      .map((doc) => ({ name: truncate(doc.title, 14), 浏览: doc.views }));
   }, [data]);
 
 
@@ -243,7 +243,7 @@ export function TabAnalytics({ knowledgeBaseId }: TabAnalyticsProps) {
 
       {/* 热门文档柱状 */}
       {popularDocChartData.length > 0 ? (
-        <ChartFrame title="热门文档浏览/引用" height={280}>
+        <ChartFrame title="热门文档浏览" height={280}>
           <ResponsiveContainer>
             <BarChart
               data={popularDocChartData}
@@ -268,7 +268,6 @@ export function TabAnalytics({ knowledgeBaseId }: TabAnalyticsProps) {
               />
               <Legend wrapperStyle={LEGEND_STYLE} />
               <Bar dataKey="浏览" fill={chartColor(0)} radius={[0, 4, 4, 0]} maxBarSize={18} />
-              <Bar dataKey="引用" fill={chartColor(1)} radius={[0, 4, 4, 0]} maxBarSize={18} />
             </BarChart>
           </ResponsiveContainer>
         </ChartFrame>
@@ -283,7 +282,6 @@ export function TabAnalytics({ knowledgeBaseId }: TabAnalyticsProps) {
               <tr>
                 <TableHeaderCell>文档</TableHeaderCell>
                 <TableHeaderCell>浏览</TableHeaderCell>
-                <TableHeaderCell>引用</TableHeaderCell>
               </tr>
             </TableHead>
             <TableBody>
@@ -291,7 +289,6 @@ export function TabAnalytics({ knowledgeBaseId }: TabAnalyticsProps) {
                 <TableRow key={doc.id}>
                   <TableCell className="font-medium truncate max-w-xs">{doc.title}</TableCell>
                   <TableCell className="text-ink-muted">{doc.views}</TableCell>
-                  <TableCell className="text-ink-muted">{doc.citations}</TableCell>
                 </TableRow>
               ))}
             </TableBody>
@@ -308,7 +305,6 @@ export function TabAnalytics({ knowledgeBaseId }: TabAnalyticsProps) {
               <tr>
                 <TableHeaderCell>条目</TableHeaderCell>
                 <TableHeaderCell>浏览</TableHeaderCell>
-                <TableHeaderCell>引用</TableHeaderCell>
               </tr>
             </TableHead>
             <TableBody>
@@ -316,7 +312,6 @@ export function TabAnalytics({ knowledgeBaseId }: TabAnalyticsProps) {
                 <TableRow key={item.id}>
                   <TableCell className="font-medium truncate max-w-xs">{item.title}</TableCell>
                   <TableCell className="text-ink-muted">{item.views}</TableCell>
-                  <TableCell className="text-ink-muted">{item.citations}</TableCell>
                 </TableRow>
               ))}
             </TableBody>

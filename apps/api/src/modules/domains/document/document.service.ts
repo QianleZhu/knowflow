@@ -18,7 +18,6 @@ import {
   knowledgeImprovementTasks,
   knowledgeItems,
   knowledgeItemFeedback,
-  messageCitations,
   parentChunks,
   tags,
   users,
@@ -442,15 +441,7 @@ export class DocumentService {
         .where(eq(knowledgeItems.sourceDocumentId, id));
       const sourceItemIds = sourceItems.map((item) => item.id);
 
-      await tx
-        .update(messageCitations)
-        .set({ documentId: null })
-        .where(eq(messageCitations.documentId, id));
       if (sourceItemIds.length > 0) {
-        await tx
-          .update(messageCitations)
-          .set({ knowledgeItemId: null })
-          .where(inArray(messageCitations.knowledgeItemId, sourceItemIds));
         await tx
           .delete(knowledgeImprovementTasks)
           .where(

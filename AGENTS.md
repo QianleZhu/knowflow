@@ -189,7 +189,7 @@ CC、Codex 与 Gemini 是三个模型，风格天然不一致；统一工具链�
 
 **后端关注**：API 契约清晰、输入校验完整、schema 可扩展、查询性能与索引、错误处理一致、日志审计可追踪。
 
-**RAG 关注**：解析质量、chunk 策略、embedding 模型与维度、向量库结构、metadata、权限过滤、召回与 rerank、答案引用来源、Prompt Injection 防护、知识库隔离。
+**RAG 关注**：解析质量、chunk 策略、embedding 模型与维度、向量库结构、metadata、权限过滤、召回与 rerank、答案来源卡片、Prompt Injection 防护、知识库隔离。
 
 **Trellis 沉淀**：`.trellis/spec/` 存长期规则、`.trellis/tasks/` 存任务上下文、`.trellis/workspace/` 存工作记忆。重大设计决策不能只留聊天记录，须写入 Trellis。
 

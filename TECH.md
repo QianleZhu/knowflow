@@ -118,7 +118,7 @@ PDF/DOCX/MD 需要启动独立 Docling 薄适配服务（见 services/docling/RE
 
 ### 设计意图
 
-单一检索方式各有盲区：向量召回擅长语义但弱于精确关键词，全文检索擅长术语但不懂同义改写，已发布的知识条目是人工沉淀的高质量答案。因此并行跑三路召回，合并去重后用 Qwen3 Rerank 精排，再将父块完整内容作为最终上下文，提供引用和可信度分级。权限过滤在召回前置——无权限的知识库根本不进 SQL。
+单一检索方式各有盲区：向量召回擅长语义但弱于精确关键词，全文检索擅长术语但不懂同义改写，已发布的知识条目是人工沉淀的高质量答案。因此并行跑三路召回，合并去重后用 Qwen3 Rerank 精排，再将父块完整内容作为最终上下文；答案后展示实际进入模型上下文的来源卡片，并提供可信度分级。权限过滤在召回前置——无权限的知识库根本不进 SQL。
 
 ### 实现要点
 
@@ -142,10 +142,10 @@ allowedKnowledgeBaseIds 为空时直接短路返回空结果，不触任何 DB�
 **Qwen3 Rerank**
 
 - `rerank_context` 将原始查询和最多 50 条 RRF 候选提交给 `qwen3-rerank`。文档输入由文档标题、子块标题路径和命中的子块内容组成；知识条目输入由条目标题和内容组成。
-- 按模型返回的候选索引映射回检索元数据，按相关性选出 Top 10。最终文档上下文使用父块全文，引用仍指向命中的子块。
+- 按模型返回的候选索引映射回检索元数据，按相关性选出 Top 10。最终文档上下文使用父块全文，来源卡片展示该父块的标题路径。
 - 模型调用失败或返回不完整结果时，按 RRF 排名取前 10 条继续构造提示词，并在检索追踪中记录兜底原因。
 
-**父子扩展**：重排判断使用子块标题路径和命中的子块内容；最终 `contextText` 使用 `parentContent ?? content`，引用仍定位到命中的子块，兼顾排序精度与上下文完整。
+**父子扩展**：重排判断使用子块标题路径和命中的子块内容；最终 `contextText` 使用 `parentContent ?? content`，来源卡片读取父块元数据中的标题路径，兼顾排序精度与上下文完整。
 
 **权限前置**：每条召回 SQL 的 `WHERE` 都带 `inArray(knowledgeBaseId, allowedKnowledgeBaseIds)`，授权范围由 Agent 的 `resolve_knowledge_scope` 节点算出（见支柱三），无权限 KB 从不被查询——杜绝越权内容进入候选/上下文/引用。
 
@@ -159,22 +159,21 @@ allowedKnowledgeBaseIds 为空时直接短路返回空结果，不触任何 DB�
 
 ### 实现要点
 
-**12 个节点**（`agent.service.ts buildGraph()` `:311-375`，按执行序）
+**11 个节点**（`agent.service.ts buildGraph()`，按执行序）
 
 | #   | 节点                             | 职责                                                                                  |
 | --- | -------------------------------- | ------------------------------------------------------------------------------------- |
 | 1   | `load_agent`                     | 加载 Agent 配置                                                                       |
 | 2   | `check_agent_permission`         | 复校当前用户可用此 Agent                                                              |
 | 3   | `resolve_knowledge_scope`        | **算授权知识库范围**：global Agent 取用户全部可访问 KB，否则取 Agent 绑定 KB ∩ 可访问 |
-| 4   | `analyze_query`                  | 关键词切分生成 rewrittenQueries（无 LLM）                                             |
-| 5   | `parse_conversation_attachments` | **加载对话记忆**（近期消息 + 摘要，见支柱四）                                         |
-| 6   | `retrieve_knowledge`             | 调检索服务（知识范围类问题短路跳过）                                                  |
-| 7   | `rerank_context`                 | 使用 Qwen3 Rerank 评估 RRF Top 50，返回 Top 10 父块上下文；失败时回退到 RRF Top 10    |
-| 8   | `build_context`                  | 拼 system context 并估算完整请求 Token；超限时裁剪低相关父块、可省略已压缩摘要        |
-| 9   | `generate_answer_stream`         | 流式调 LLM 生成答案                                                                   |
-| 10  | `attach_citations`               | 上下文映射为引用来源                                                                  |
-| 11  | `calculate_confidence`           | 证据打分 → 强/中/弱/无答案                                                            |
-| 12  | `record_trace`                   | 落库助手消息 + 引用 + trace，并触发摘要                                               |
+| 4   | `parse_conversation_attachments` | **加载对话记忆**（近期消息 + 摘要，见支柱四）                                         |
+| 5   | `analyze_query`                  | 规划问题路由                                                                          |
+| 6   | `rewrite_query`                  | 生成检索改写（仅需要检索时执行）                                                      |
+| 7   | `retrieve_knowledge`             | 调检索服务（知识范围类问题短路跳过）                                                  |
+| 8   | `rerank_context`                 | 使用 Qwen3 Rerank 评估 RRF Top 50，返回 Top 10 父块上下文；失败时回退到 RRF Top 10    |
+| 9   | `build_context`                  | 拼 system context 并估算完整请求 Token；超限时裁剪低相关父块、可省略已压缩摘要        |
+| 10  | `generate_answer_stream`         | 流式调 LLM 生成答案并确定可信度                                                       |
+| 11  | `record_trace`                   | 保存助手消息、实际使用的检索上下文和 Trace，并触发摘要                                |
 
 **一次问答一路到底**（`ask()` → `buildGraph().invoke()`，每个节点产出新 state 传给下一个）：
 
@@ -187,9 +186,8 @@ allowedKnowledgeBaseIds 为空时直接短路返回空结果，不触任何 DB�
 7. **rerank_context**：用 Qwen3 Rerank 对最多 50 条候选排序，生成 Top 10 上下文；失败时按 RRF 前 10 条兜底，并记录追踪。
 8. **build_context**：用本地 Qwen Tokenizer 估算系统规则、授权父块、会话历史与当前问题的完整输入。超限时删除低排名上下文并保留前五个文档父块；仍超限时整体省略已压缩摘要，但保留最近六条完整消息，再把父块正文降为命中子块正文并截短。裁剪结果只存在当前图状态，不写回会话历史。
 9. **generate_answer_stream**：只发送 `build_context` 生成的消息快照；流式结束后采集服务端实际输入/输出 Token 用量。
-10. **attach_citations**（`:612-621`）：把命中的上下文映射成引用来源（`noAnswerType` 非空则空引用）。
-11. **calculate_confidence**（`:623-678`）：按证据强度打分 → `strong/medium/weak/not_found`。
-12. **record_trace**（`:680-772`）：单事务落库助手消息 + 引用 + `agentRuntimeTraces`，更新会话 `lastMessageAt/title`；事务提交后 fire-and-forget 触发摘要任务（支柱四）。
+10. **generate_answer_stream**：流式返回答案，并按当前授权检索上下文判定可信度。
+11. **record_trace**：单事务保存助手消息、实际使用的检索上下文与 `agentRuntimeTraces`，更新会话 `lastMessageAt/title`；事务提交后 fire-and-forget 触发摘要任务（支柱四）。
 
 **全程可观测**（`runStep` `:377-405`）：每个节点都包一层，进出各发 `agent.step.started/completed` SSE、记录 `{name,status,at}`；抛错则发 `agent.failed` 并写错误 trace。`record_trace` 落的 `agentRuntimeTraces` 含：图版本、状态快照、各步骤耗时、检索来源元数据、Token 预算与实际用量、模型配置、置信度和延迟。父块正文与完整请求提示词只存在本轮运行内存中，不写入会话或追踪记录。
 

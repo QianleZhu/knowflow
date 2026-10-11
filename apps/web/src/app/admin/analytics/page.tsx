@@ -277,7 +277,6 @@ function AnalyticsContent() {
                           <TableHeaderCell>标题</TableHeaderCell>
                           <TableHeaderCell>所属知识库</TableHeaderCell>
                           <TableHeaderCell>查看次数</TableHeaderCell>
-                          <TableHeaderCell>引用次数</TableHeaderCell>
                         </TableRow>
                       </TableHead>
                       <TableBody>
@@ -286,7 +285,6 @@ function AnalyticsContent() {
                             <TableCell className="font-medium">{doc.title}</TableCell>
                             <TableCell className="text-ink-muted">{doc.knowledgeBaseName}</TableCell>
                             <TableCell className="text-ink-muted">{doc.views}</TableCell>
-                            <TableCell className="text-ink-muted">{doc.citations}</TableCell>
                           </TableRow>
                         ))}
                       </TableBody>
@@ -304,7 +302,6 @@ function AnalyticsContent() {
                           <TableHeaderCell>标题</TableHeaderCell>
                           <TableHeaderCell>所属知识库</TableHeaderCell>
                           <TableHeaderCell>查看次数</TableHeaderCell>
-                          <TableHeaderCell>引用次数</TableHeaderCell>
                         </TableRow>
                       </TableHead>
                       <TableBody>
@@ -313,7 +310,6 @@ function AnalyticsContent() {
                             <TableCell className="font-medium">{item.title}</TableCell>
                             <TableCell className="text-ink-muted">{item.knowledgeBaseName}</TableCell>
                             <TableCell className="text-ink-muted">{item.views}</TableCell>
-                            <TableCell className="text-ink-muted">{item.citations}</TableCell>
                           </TableRow>
                         ))}
                       </TableBody>

@@ -1733,7 +1733,6 @@ export class KnowledgeImprovementService {
       metadata: this.record(row.metadata),
       enabled: row.enabled,
       viewCount: row.viewCount,
-      citeCount: row.citeCount,
       likeCount: row.likeCount,
       dislikeCount: row.dislikeCount,
       userFeedback: null,

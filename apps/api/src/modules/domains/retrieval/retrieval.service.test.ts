@@ -37,7 +37,6 @@ type RecallKnowledgeItemRow = {
   verifiedAt: Date | null;
   status: "draft" | "pending_review" | "published" | "unpublished" | "expired";
   viewCount: number;
-  citeCount: number;
   likeCount: number;
   createdAt: Date;
   score: number;
@@ -151,7 +150,6 @@ function makeKnowledgeItemRow(overrides: {
     verifiedAt: new Date("2026-06-04T00:00:00.000Z"),
     status: "published",
     viewCount: 0,
-    citeCount: 0,
     likeCount: 0,
     createdAt: new Date("2026-06-04T00:00:00.000Z"),
     score: overrides.score,

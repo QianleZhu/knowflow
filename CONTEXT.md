@@ -40,7 +40,7 @@ packages/db     Drizzle schema / migrations / db client(api、seed、worker 共�
 
 - **前端**:Next.js(App Router),CC 负责。
 - **后端**:独立 **NestJS** 服务,Codex 负责。提供 REST API,SSE 用于流式回答。按领域划分 module(auth / knowledge-base / document / agent / retrieval / model 等),用 Guard 承载权限校验。
-- **Agent Runtime**:LangGraph.js(TS 版)。**P0 即按 12 节点固定图实现**(load_agent → check_agent_permission → resolve_knowledge_scope → analyze_query → parse_conversation_attachments → retrieve_knowledge → rerank_context → build_context → generate_answer_stream → attach_citations → calculate_confidence → record_trace),全程 trace。构建上下文时按 Qwen Tokenizer 估算完整请求预算；裁剪只影响本轮请求副本，会话消息仍完整保存。P1/P2 在图上加节点(工具调用 / MCP / 工具流),不重构核心链路。
+- **Agent Runtime**: LangGraph.js（TypeScript）。当前固定图为 11 个节点：load_agent → check_agent_permission → resolve_knowledge_scope → parse_conversation_attachments → analyze_query → rewrite_query → retrieve_knowledge → rerank_context → build_context → generate_answer_stream → record_trace；按查询路由跳过不需要的节点，全程保留 AgentTrace。回答来源卡片展示实际进入模型上下文的来源及父块标题路径，不生成行内编号或单独引用关系。构建上下文时按 Qwen Tokenizer 估算完整请求预算；裁剪只影响本轮请求副本，会话消息仍完整保存。P1/P2 在图上加节点（工具调用 / MCP / 工具流），不重构核心链路。
 - **异步任务**:Redis + BullMQ,Worker 作为独立进程,与后端共享 Redis / PostgreSQL。
 - **存储**:PostgreSQL + pgvector(向量)+ PostgreSQL Full Text Search(关键词);对象存储第一期用本地文件系统。
 - **本机 vs Docker 边界**:**仅基础有状态服务用 Docker**(PostgreSQL+pgvector、Redis),由 `docker-compose` 起。**前端 / 后端 / Worker 不容器化,本机 `npm run dev` 启动**(热重载快、调试直接)。

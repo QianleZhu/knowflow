@@ -40,7 +40,6 @@ export type RetrievalCandidate = {
 
 export type RetrievalContextItem = RetrievalCandidate & {
   contextText: string;
-  citationIndex: number;
 };
 
 export type RetrievalTrace = {

@@ -196,7 +196,7 @@ export function buildMessageCompressionPrompt(messages: ConversationMemoryMessag
     "Compress only the newly supplied, uncompressed messages for an enterprise knowledge-base assistant.",
     SUMMARY_INPUT_GUARDRAIL,
     "Keep stable user goals, constraints, decisions, unresolved questions, and important facts needed for future turns.",
-    "Drop small talk, duplicated details, citations, and transient wording. Do not add facts not present in the conversation.",
+    "Drop small talk, duplicated details, source lists, and transient wording. Do not add facts not present in the conversation.",
     `Limit the summary to ${String(SUMMARY_MAX_CHARS)} characters.`,
     `Uncompressed messages to summarize:\n${formatConversationMessages(messages)}`,
   ].join("\n\n");
