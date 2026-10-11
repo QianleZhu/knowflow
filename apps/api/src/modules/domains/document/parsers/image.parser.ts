@@ -23,7 +23,7 @@ export async function parseImageDocument(
     stats,
   );
   if (text === null) {
-    throw new Error("图片文档视觉 OCR 失败，请检查 OCR 模型配置后重试");
+    throw new Error("图片文档视觉 OCR 失败，请检查服务端 AI 配置后重试");
   }
 
   const parsed = await toParsedDocument(text, "vision-ocr", {

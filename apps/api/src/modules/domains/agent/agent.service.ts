@@ -687,7 +687,6 @@ export class AgentService {
         rerankQuery,
         documents,
         retrieval.candidates.length,
-        undefined,
         RERANK_INSTRUCTION,
       );
       if (

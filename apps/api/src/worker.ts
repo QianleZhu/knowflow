@@ -1,7 +1,6 @@
 import "reflect-metadata";
 import "./shared/config/load-env.js";
 import { Worker } from "bullmq";
-import { requireModelApiKeyEncryptionKey } from "@knowflow/db";
 import { NestFactory } from "@nestjs/core";
 
 import { AppModule } from "./modules/app.module.js";
@@ -40,8 +39,6 @@ import {
   processImprovementVerify,
 } from "./modules/domains/knowledge-base/knowledge-improvement-processor.js";
 import { getRedisConnectionOptions } from "./shared/redis/redis-connection.js";
-
-requireModelApiKeyEncryptionKey();
 
 const app = await NestFactory.createApplicationContext(AppModule);
 const llm = app.get(AliyunLlmService);

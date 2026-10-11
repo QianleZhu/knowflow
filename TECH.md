@@ -22,7 +22,7 @@
   - [五、知识自动提炼闭环](#五知识自动提炼闭环)
     - [设计意图](#设计意图-4)
     - [实现要点](#实现要点-4)
-  - [六、跨切面：模型配置与向量空间](#六跨切面模型配置与向量空间)
+  - [七、模型运行配置与向量空间](#七模型运行配置与向量空间)
 
 ---
 
@@ -155,7 +155,7 @@ allowedKnowledgeBaseIds 为空时直接短路返回空结果，不触任何 DB�
 
 ### 设计意图
 
-把一次问答拆成职责单一、可观测、可回放的节点链，用 LangGraph 固定有向图串起来。每个节点只做一件事，全程产生 trace（节点耗时、检索快照、prompt 快照、模型配置），便于排查与审计。图是**线性固定**的（START → … → END），不做动态分支，保证行为可预测。
+把一次问答拆成职责单一、可观测、可回放的节点链，用 LangGraph 固定有向图串起来。每个节点只做一件事，全程产生 trace（节点耗时、检索快照、prompt 快照、模型参数），便于排查与审计。图是**线性固定**的（START → … → END），不做动态分支，保证行为可预测。
 
 ### 实现要点
 
@@ -299,11 +299,11 @@ allowedKnowledgeBaseIds 为空时直接短路返回空结果，不触任何 DB�
 
 ---
 
-## 七、跨切面：模型配置与向量空间
+## 七、模型运行配置与向量空间
 
-**模型用途映射 + 热切换**（`model-usage-client.ts` + seed `:451-481`）：模型按「用途」（usageType）解耦——`chat` / `query_understanding` / `embedding` / `rerank` / `knowledge_production` / `agent_generation` 等各映射到一个供应商+模型，运行时从 DB 表 `modelUsagePolicies` 解析（含 default→fallback 顺序），改配置无需重启。API Key 加密存储（`encryptApiKey`），DB 不存明文。
+**模型用途映射**（`apps/api/src/shared/llm/model-usage-client.ts`）：模型名称和调用参数由 API 服务端内部映射固定，覆盖 `chat`、`query_understanding`、`document_processing`、`embedding`、`rerank`、`ocr`、`vision`、`knowledge_production` 与 `agent_generation`。阿里云百炼 API Key 每次模型调用都从 `ALIYUN_API_KEY` 环境变量读取；数据库不再保存供应商、模型目录或用途策略，也不保存模型 Key。`ALIYUN_BASE_URL` 可覆盖默认兼容模式地址。
 
-> seed 预置阿里云百炼：`qwen-plus`（chat / 知识生产 / agent 生成）、`qwen-turbo`（query_understanding）、`text-embedding-v4`（embedding）、`qwen3-rerank`（rerank）。图片 OCR 用途（`ocr`）未在 seed 预置，需在模型配置后台另配，否则图片解析会提示配置。
+> 内部模型映射：`qwen-plus`（对话、文档处理、知识生产、Agent 生成）、`qwen-turbo`（问题理解）、`text-embedding-v4`（嵌入）、`qwen3-rerank`（重排）、`qwen-vl-plus`（图片 OCR 与视觉理解）。
 
 **向量空间统一**（`EXPECTED_EMBEDDING_DIMENSION = 1024`，`aliyun-llm.ts:10`）：所有嵌入强校验 1024 维（写入子块、发布知识条目、嵌入查询三处都校验），pgvector 统一 `vector(1024)` 列，保证同库可比。维度不符直接抛错，杜绝脏向量入库。
 

@@ -28,7 +28,6 @@ type ProcessableDocument = {
   fileId: string | null;
   fileType: string | null;
   title: string;
-  embeddingModel: string;
   metadata: unknown;
 };
 
@@ -154,7 +153,6 @@ async function findProcessableDocument(
       fileId: documents.fileId,
       fileType: documents.fileType,
       title: documents.title,
-      embeddingModel: knowledgeBases.embeddingModel,
       metadata: documents.metadata,
     })
     .from(documents)
@@ -415,10 +413,7 @@ async function embedChildChunks(
   const client = createAliyunLlmClient();
   for (let start = 0; start < chunks.length; start += EMBEDDING_BATCH_SIZE) {
     const batch = chunks.slice(start, start + EMBEDDING_BATCH_SIZE);
-    const embeddings = await client.embedTexts(
-      batch.map((chunk) => chunk.content),
-      document.embeddingModel,
-    );
+    const embeddings = await client.embedTexts(batch.map((chunk) => chunk.content));
     if (embeddings.length !== batch.length) {
       throw new Error("向量化返回数量与输入片段数量不一致");
     }

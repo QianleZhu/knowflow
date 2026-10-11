@@ -226,7 +226,6 @@ const [range, setRange] = useState<DateRange | undefined>();
 - `pnpm --dir apps/web exec next dev --port 3100`
 - `GET /` 返回 200
 - `GET /knowledge-bases` 返回 200
-- `GET /models` 返回 200
 - `GET /login` 返回 200
 - `GET /agents` 返回 200
 

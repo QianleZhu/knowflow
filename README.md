@@ -6,7 +6,7 @@ knowflow 是面向企业/机构内部场景的 AI 知识库系统。它把分散
 
 ```text
 技术栈   Next.js · NestJS · LangGraph.js · BullMQ + Redis · PostgreSQL + pgvector · Drizzle ORM · TypeScript
-模型     阿里云百炼 DashScope（对话 / Embedding 1024 维 / Rerank / 知识生产 / 视觉 OCR），支持后台多供应商配置
+模型     阿里云百炼 DashScope（对话 / Embedding 1024 维 / Rerank / 知识生产 / 视觉 OCR），模型由 API 内部固定映射，API Key 从环境变量读取
 ```
 
 ### 课题覆盖度
@@ -102,7 +102,7 @@ README 只保留总览；完整的「设计意图 -> 实现要点 -> 关键代�
 | LangGraph 编排 | 12 个固定节点：加载 Agent、校验权限、解析知识范围、加载记忆、检索、构建提示词、流式回答、引用、置信度、trace。                                   | [TECH.md](TECH.md#三langgraph-12-节点-agent-编排) |
 | 对话记忆       | 最近 6 条消息同步注入；早期对话由 Worker 异步生成滚动摘要；全部按不可信背景注入，防 Prompt Injection。                                           | [TECH.md](TECH.md#四对话记忆短期窗口--滚动摘要)   |
 | 知识生产闭环   | 文档导入、点踩、纠错、无答案信号 -> 候选任务 -> 审核通过 -> 发布知识条目 -> 纳入 RAG。                                                           | [TECH.md](TECH.md#五知识自动提炼闭环)             |
-| 模型与向量空间 | `chat` / `embedding` / `rerank` / `knowledge_production` 等用途映射；pgvector 统一 `vector(1024)` 并强校验维度。                                 | [TECH.md](TECH.md#六跨切面模型配置与向量空间)     |
+| 模型与向量空间 | 模型按用途由 API 内部固定映射，API Key 从环境变量读取；pgvector 统一 `vector(1024)` 并强校验维度。                                               | [TECH.md](TECH.md#七模型运行配置与向量空间)       |
 
 ---
 
@@ -113,7 +113,7 @@ README 只保留总览；完整的「设计意图 -> 实现要点 -> 关键代�
 - Node.js 22.13+
 - pnpm 10+
 - Docker（仅用于 PostgreSQL + Redis）
-- 阿里云百炼 DashScope API Key（用于对话、Embedding、Rerank、知识生产；图片 OCR 需额外配置 OCR 用途模型）
+- 阿里云百炼 DashScope API Key（用于对话、Embedding、Rerank、知识生产和图片 OCR）
 
 ### 环境变量
 
@@ -125,15 +125,15 @@ cp .env.example .env
 
 重点检查：
 
-| 变量                           | 用途               | 说明                               |
-| ------------------------------ | ------------------ | ---------------------------------- |
-| `DATABASE_URL`                 | PostgreSQL 连接    | 需与 docker compose 端口一致。     |
-| `REDIS_URL`                    | Redis 连接         | Worker、队列、进度回推依赖 Redis。 |
-| `SESSION_SECRET`               | Session 签名       | 本地开发也必须配置。               |
-| `MODEL_API_KEY_ENCRYPTION_KEY` | 模型 Key 加密      | 32 字节 base64。                   |
-| `ALIYUN_API_KEY`               | 默认模型供应商 Key | seed 会写入默认模型配置。          |
-| `SEED_ADMIN_USER`              | 初始超管账号       | 首次登录使用。                     |
-| `SEED_ADMIN_PASSWORD`          | 初始超管密码       | 首次登录使用。                     |
+| 变量                  | 用途                | 说明                                                   |
+| --------------------- | ------------------- | ------------------------------------------------------ |
+| `DATABASE_URL`        | PostgreSQL 连接     | 需与 docker compose 端口一致。                         |
+| `REDIS_URL`           | Redis 连接          | Worker、队列、进度回推依赖 Redis。                     |
+| `SESSION_SECRET`      | Session 签名        | 本地开发也必须配置。                                   |
+| `ALIYUN_API_KEY`      | 阿里云百炼 API Key  | API 与 Worker 调用模型时从环境变量读取，不写入数据库。 |
+| `ALIYUN_BASE_URL`     | 阿里云百炼 API 地址 | 可选，默认使用 DashScope 兼容模式地址。                |
+| `SEED_ADMIN_USER`     | 初始超管账号        | 首次登录使用。                                         |
+| `SEED_ADMIN_PASSWORD` | 初始超管密码        | 首次登录使用。                                         |
 
 ### 启动步骤
 
@@ -199,8 +199,7 @@ apps/web/src/app                      前端页面与路由
   ├── admin/                          管理后台页面（部门、用户、操作审计）
   ├── agents/                         专家 Agent 页面（列表、详情、对话）
   ├── knowledge-bases/                知识库主页面（列表、详情、文档、条目、统计）
-  ├── login/                          登录页面
-  └── models/                         模型配置后台页面
+  └── login/                          登录页面
 
 apps/api/src/modules                  NestJS 领域模块
   └── domains/                        业务领域模块集合
@@ -210,7 +209,6 @@ apps/api/src/modules                  NestJS 领域模块
       ├── document/                   文档上传、解析、分段、向量化、进度回推
       ├── retrieval/                  三路召回、Rerank、父子扩展
       ├── agent/                      LangGraph 问答运行时、对话记忆、会话归档
-      ├── model/                      模型供应商、用途映射、加密 Key、热切换
       ├── analytics/                  使用热度统计
       └── health/                     健康检查
 
@@ -250,7 +248,7 @@ pnpm --filter @knowflow/api worker
 
 ### 图片 OCR 不工作
 
-文字 PDF 和 DOCX 需要启动 [Docling 解析适配服务](services/docling/README.md)。日常在仓库根目录执行 `.\services\docling\docling.ps1 start`，随后运行 `pnpm dev:all`；依赖与模型只需首次安装。Markdown 使用原生语法树，扫描 PDF 和图片复用视觉 OCR；混合 PDF 按页选择 Docling 或 OCR。图片识别依赖模型配置中的 `ocr` 用途模型，需在后台启用。
+文字 PDF 和 DOCX 需要启动 [Docling 解析适配服务](services/docling/README.md)。日常在仓库根目录执行 `.\services\docling\docling.ps1 start`，随后运行 `pnpm dev:all`；依赖与模型只需首次安装。Markdown 使用原生语法树，扫描 PDF 和图片复用视觉 OCR；混合 PDF 按页选择 Docling 或 OCR。图片识别使用 API 内部固定的 `qwen-vl-plus`，并从环境变量读取阿里云百炼 API Key。
 
 所有格式统一输出结构块，再生成父子块；物理分页不强制结束章节。父块携带完整标题路径、实际内容的页码集合和来源坐标，子块继承父块元数据。跨页续表根据相邻页、同一章节与匹配表头合并，长表格按数据行切分并重复表头。OCR 不设置项目调用次数或输出 token 上限，必需页面失败或输出截断会报告失败。实现与验证说明见 [文档解析与分块方案](docs/document-parsing-plan.md)。已有文档需要点击“重新处理”应用新策略。
 

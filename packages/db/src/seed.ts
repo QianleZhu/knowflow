@@ -3,7 +3,6 @@ import "./load-env.js";
 import { and, eq } from "drizzle-orm";
 
 import { closeDb, db } from "./client.js";
-import { encryptApiKey, requireModelApiKeyEncryptionKey } from "./api-key-encryption.js";
 import { hashPassword } from "./password.js";
 import {
   agentKnowledgeBases,
@@ -13,9 +12,6 @@ import {
   knowledgeBaseAdmins,
   knowledgeBaseMembers,
   knowledgeBases,
-  modelCatalog,
-  modelProviders,
-  modelUsagePolicies,
   users,
 } from "./schema.js";
 
@@ -27,11 +23,6 @@ type DepartmentSeed = {
 type UserSeed = {
   id: string;
   username: string;
-};
-
-type ModelSeed = {
-  id: string;
-  modelName: string;
 };
 
 const DEFAULT_PASSWORD = "ChangeMe_123456";
@@ -169,126 +160,6 @@ async function ensureKnowledgeBaseMember(knowledgeBaseId: string, userId: string
     });
 }
 
-async function ensureModelProvider(): Promise<string> {
-  const providerName = "阿里云百炼";
-  const encryptedApiKey =
-    process.env["ALIYUN_API_KEY"] === undefined || process.env["ALIYUN_API_KEY"].trim() === ""
-      ? null
-      : encryptApiKey(process.env["ALIYUN_API_KEY"]);
-  const existing = await db.query.modelProviders.findFirst({
-    where: eq(modelProviders.name, providerName),
-    columns: {
-      id: true,
-      encryptedApiKey: true,
-    },
-  });
-
-  if (existing !== undefined) {
-    if (encryptedApiKey !== null) {
-      await db
-        .update(modelProviders)
-        .set({
-          encryptedApiKey,
-          remark: "Seed default provider with encrypted API key.",
-          updatedAt: new Date(),
-        })
-        .where(eq(modelProviders.id, existing.id));
-    }
-    return existing.id;
-  }
-
-  const [created] = await db
-    .insert(modelProviders)
-    .values({
-      name: providerName,
-      providerType: "aliyun",
-      baseUrl:
-        process.env["ALIYUN_BASE_URL"] ?? "https://dashscope.aliyuncs.com/compatible-mode/v1",
-      encryptedApiKey,
-      remark: "Seed default provider with encrypted API key.",
-    })
-    .returning({ id: modelProviders.id });
-
-  if (created === undefined) {
-    throw new Error("Failed to seed model provider");
-  }
-
-  return created.id;
-}
-
-async function ensureModel(
-  providerId: string,
-  modelName: string,
-  modelType: ModelType,
-): Promise<ModelSeed> {
-  const existing = await db.query.modelCatalog.findFirst({
-    where: and(eq(modelCatalog.providerId, providerId), eq(modelCatalog.modelName, modelName)),
-    columns: {
-      id: true,
-      modelName: true,
-    },
-  });
-
-  if (existing !== undefined) {
-    return existing;
-  }
-
-  const [created] = await db
-    .insert(modelCatalog)
-    .values({
-      providerId,
-      modelName,
-      modelType,
-      supportsStreaming: modelType === "chat",
-      contextWindow: modelType === "chat" ? 128000 : null,
-    })
-    .returning({
-      id: modelCatalog.id,
-      modelName: modelCatalog.modelName,
-    });
-
-  if (created === undefined) {
-    throw new Error(`Failed to seed model ${modelName}`);
-  }
-
-  return created;
-}
-
-type ModelType = "chat" | "embedding" | "rerank" | "ocr" | "vision" | "moderation";
-
-async function ensureUsagePolicy(input: {
-  usageType:
-    | "chat"
-    | "query_understanding"
-    | "document_processing"
-    | "embedding"
-    | "rerank"
-    | "ocr"
-    | "vision"
-    | "knowledge_production"
-    | "agent_generation";
-  modelId: string;
-  temperature?: number;
-  maxOutputTokens?: number;
-}): Promise<void> {
-  await db
-    .insert(modelUsagePolicies)
-    .values({
-      usageType: input.usageType,
-      defaultModelId: input.modelId,
-      temperature: input.temperature ?? 0.7,
-      maxOutputTokens: input.maxOutputTokens ?? null,
-    })
-    .onConflictDoUpdate({
-      target: modelUsagePolicies.usageType,
-      set: {
-        defaultModelId: input.modelId,
-        temperature: input.temperature ?? 0.7,
-        maxOutputTokens: input.maxOutputTokens ?? null,
-      },
-    });
-}
-
 async function ensureDefaultAgent(input: {
   name: string;
   description: string;
@@ -371,8 +242,8 @@ async function ensureGlobalAgent(createdBy: string): Promise<void> {
   });
 }
 
+// 创建基础账号、部门、知识库与 Agent；模型参数由 API 内部配置。
 async function runSeed(): Promise<void> {
-  requireModelApiKeyEncryptionKey();
   const defaultDepartment = await ensureDepartment("默认部门");
   const hr = await ensureDepartment("人事部");
   const finance = await ensureDepartment("财务部");
@@ -448,45 +319,13 @@ async function runSeed(): Promise<void> {
   });
   await ensureGlobalAgent(admin.id);
 
-  const providerId = await ensureModelProvider();
-  const qwenPlus = await ensureModel(providerId, "qwen-plus", "chat");
-  const qwenTurbo = await ensureModel(providerId, "qwen-turbo", "chat");
-  const embedding = await ensureModel(providerId, "text-embedding-v4", "embedding");
-  const rerank = await ensureModel(providerId, "qwen3-rerank", "rerank");
-
-  await Promise.all([
-    ensureUsagePolicy({ usageType: "chat", modelId: qwenPlus.id, maxOutputTokens: 4096 }),
-    ensureUsagePolicy({
-      usageType: "query_understanding",
-      modelId: qwenTurbo.id,
-      maxOutputTokens: 1024,
-    }),
-    ensureUsagePolicy({
-      usageType: "document_processing",
-      modelId: qwenPlus.id,
-      maxOutputTokens: 2048,
-    }),
-    ensureUsagePolicy({ usageType: "embedding", modelId: embedding.id, temperature: 0 }),
-    ensureUsagePolicy({ usageType: "rerank", modelId: rerank.id, temperature: 0 }),
-    ensureUsagePolicy({
-      usageType: "knowledge_production",
-      modelId: qwenPlus.id,
-      maxOutputTokens: 2048,
-    }),
-    ensureUsagePolicy({
-      usageType: "agent_generation",
-      modelId: qwenPlus.id,
-      maxOutputTokens: 2048,
-    }),
-  ]);
-
   console.log(
     JSON.stringify(
       {
         admin: admin.username,
         departments: [defaultDepartment.name, hr.name, finance.name, research.name],
         knowledgeBases: [publicKb, departmentKb, restrictedKb],
-        provider: "阿里云百炼",
+        models: "由 API 服务端内部配置",
       },
       null,
       2,

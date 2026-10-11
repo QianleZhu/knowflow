@@ -60,7 +60,6 @@ type KnowledgeBaseRow = {
   indexStatus: "not_indexed" | "indexing" | "ready" | "partial_failed" | "failed";
   creatorId: string;
   creatorName: string;
-  embeddingModel: string;
   embeddingDimension: number;
   deletedAt: Date | null;
   createdAt: Date;
@@ -333,7 +332,6 @@ function makeKnowledgeBaseRow(overrides: Partial<KnowledgeBaseRow> = {}): Knowle
     indexStatus: "ready",
     creatorId: "00000000-0000-0000-0000-000000000001",
     creatorName: "Alice",
-    embeddingModel: "text-embedding-v4",
     embeddingDimension: 1024,
     deletedAt: null,
     createdAt: new Date("2026-06-04T00:00:00.000Z"),

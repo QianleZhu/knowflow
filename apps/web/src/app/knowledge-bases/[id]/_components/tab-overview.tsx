@@ -83,13 +83,8 @@ export function TabOverview({ kb, overview }: TabOverviewProps) {
               <InfoRow icon={<User />} label="创建人" value={kb.creatorName} />
               <InfoRow
                 icon={<Cpu />}
-                label="嵌入模型"
-                value={
-                  <span className="inline-flex items-center gap-1.5">
-                    {kb.embeddingModel}
-                    <Badge tone="neutral">{kb.embeddingDimension}d</Badge>
-                  </span>
-                }
+                label="向量维度"
+                value={<Badge tone="neutral">{kb.embeddingDimension}d</Badge>}
               />
               <InfoRow
                 icon={<Calendar />}

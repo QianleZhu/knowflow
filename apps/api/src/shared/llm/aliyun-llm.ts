@@ -1,8 +1,12 @@
 import { Injectable } from "@nestjs/common";
-import type { ModelUsageType } from "@knowflow/shared";
 import OpenAI from "openai";
 
-import { resolveModelConfig, type ResolvedModelConfig } from "./model-usage-client.js";
+import {
+  resolveModelConfig,
+  type ModelConfigResolver,
+  type ModelUsageType,
+  type ResolvedModelConfig,
+} from "./model-usage-client.js";
 
 export const EXPECTED_EMBEDDING_DIMENSION = 1024;
 
@@ -37,67 +41,70 @@ export type ChatStreamChunk = {
 
 @Injectable()
 export class AliyunLlmService {
-  async embedTexts(texts: string[], model?: string): Promise<number[][]> {
-    return createAliyunLlmClient().embedTexts(texts, model);
+  // 使用服务端固定的嵌入模型生成文本向量。
+  async embedTexts(texts: string[]): Promise<number[][]> {
+    return createAliyunLlmClient().embedTexts(texts);
   }
 
+  // 使用固定重排模型为候选文档评分。
   async rerank(
     query: string,
     documents: string[],
     topN: number,
-    model?: string,
     instruct?: string,
   ): Promise<RerankResult[]> {
-    return createAliyunLlmClient().rerank(query, documents, topN, model, instruct);
+    return createAliyunLlmClient().rerank(query, documents, topN, instruct);
   }
 
+  // 按内部用途流式生成对话内容。
   streamChat(input: {
     messages: ChatMessage[];
     usageType?: Extract<ModelUsageType, "chat" | "query_understanding">;
-    model?: string;
     temperature?: number;
     maxOutputTokens?: number;
   }): AsyncIterable<ChatStreamChunk> {
     return createAliyunLlmClient().streamChat(input);
   }
 
+  // 按内部用途生成非流式对话内容。
   async completeChat(input: {
     messages: ChatMessage[];
     usageType?: Extract<
       ModelUsageType,
       "chat" | "query_understanding" | "agent_generation" | "knowledge_production"
     >;
-    model?: string;
     temperature?: number;
     maxOutputTokens?: number;
   }): Promise<string> {
     return createAliyunLlmClient().completeChat(input);
   }
 
+  // 返回可写入运行追踪的模型参数，不包含 API Key。
   async getModelConfig(usageType: ModelUsageType): Promise<ModelConfig> {
     return createAliyunLlmClient().getModelConfig(usageType);
   }
 }
 
+// 创建默认运行时模型客户端。
 export function createAliyunLlmClient(): AliyunLlmClient {
   return new AliyunLlmClient();
 }
 
 export class AliyunLlmClient {
+  // 允许调用方注入配置解析器，便于在隔离环境中验证客户端行为。
   constructor(
-    private readonly modelConfigResolver: (
-      usageType: ModelUsageType,
-    ) => Promise<ResolvedModelConfig> = resolveModelConfig,
+    private readonly modelConfigResolver: ModelConfigResolver = resolveModelConfig,
   ) {}
 
-  async embedTexts(texts: string[], model?: string): Promise<number[][]> {
+  // 调用固定嵌入模型，并校验返回数量和向量维度。
+  async embedTexts(texts: string[]): Promise<number[][]> {
     if (texts.length === 0) {
       return [];
     }
 
     const config = await this.resolveModelConfig("embedding");
     const response = await this.createOpenAiClient(config).embeddings.create({
-      model: model ?? config.model,
+      model: config.model,
       input: texts,
     });
     if (response.data.length !== texts.length) {
@@ -112,11 +119,11 @@ export class AliyunLlmClient {
     });
   }
 
+  // 调用固定重排模型，并校验供应商返回的候选索引与分数。
   async rerank(
     query: string,
     documents: string[],
     topN: number,
-    model?: string,
     instruct?: string,
   ): Promise<RerankResult[]> {
     if (documents.length === 0) {
@@ -138,7 +145,7 @@ export class AliyunLlmClient {
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            model: model ?? config.model,
+            model: config.model,
             query,
             documents,
             top_n: Math.min(topN, documents.length),
@@ -195,17 +202,17 @@ export class AliyunLlmClient {
     throw new Error("Model provider request failed");
   }
 
+  // 按内部用途流式生成对话内容。
   async *streamChat(input: {
     messages: ChatMessage[];
     usageType?: Extract<ModelUsageType, "chat" | "query_understanding">;
-    model?: string;
     temperature?: number;
     maxOutputTokens?: number;
   }): AsyncIterable<ChatStreamChunk> {
     const config = await this.resolveModelConfig(input.usageType ?? "chat");
     const maxTokens = input.maxOutputTokens ?? config.maxOutputTokens;
     const stream = await this.createOpenAiClient(config).chat.completions.create({
-      model: input.model ?? config.model,
+      model: config.model,
       messages: input.messages,
       temperature: input.temperature ?? config.temperature,
       ...(maxTokens === null ? {} : { max_tokens: maxTokens }),
@@ -220,20 +227,20 @@ export class AliyunLlmClient {
     }
   }
 
+  // 按内部用途生成非流式对话内容。
   async completeChat(input: {
     messages: ChatMessage[];
     usageType?: Extract<
       ModelUsageType,
       "chat" | "query_understanding" | "agent_generation" | "knowledge_production"
     >;
-    model?: string;
     temperature?: number;
     maxOutputTokens?: number;
   }): Promise<string> {
     const config = await this.resolveModelConfig(input.usageType ?? "chat");
     const maxTokens = input.maxOutputTokens ?? config.maxOutputTokens;
     const response = await this.createOpenAiClient(config).chat.completions.create({
-      model: input.model ?? config.model,
+      model: config.model,
       messages: input.messages,
       temperature: input.temperature ?? config.temperature,
       ...(maxTokens === null ? {} : { max_tokens: maxTokens }),
@@ -242,6 +249,7 @@ export class AliyunLlmClient {
     return response.choices[0]?.message.content ?? "";
   }
 
+  // 返回模型审计信息，不包含 API Key。
   async getModelConfig(usageType: ModelUsageType): Promise<ModelConfig> {
     const config = await this.resolveModelConfig(usageType);
     return {
@@ -253,10 +261,12 @@ export class AliyunLlmClient {
     };
   }
 
+  // 按用途取得不可由调用参数覆盖的模型配置。
   private async resolveModelConfig(usageType: ModelUsageType): Promise<ResolvedModelConfig> {
     return this.modelConfigResolver(usageType);
   }
 
+  // 使用统一超时、重试和环境 Key 创建 OpenAI 兼容客户端。
   private createOpenAiClient(config: ResolvedModelConfig): OpenAI {
     return new OpenAI({
       apiKey: config.apiKey,

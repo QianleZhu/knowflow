@@ -84,7 +84,9 @@ export async function parsePdfDocument(
         );
       }
       if (text === null || text.trim().length === 0)
-        throw new Error(`扫描件 PDF 第 ${String(page)} 页视觉 OCR 失败，请检查 OCR 模型配置后重试`);
+        throw new Error(
+          `扫描件 PDF 第 ${String(page)} 页视觉 OCR 失败，请检查服务端 AI 配置后重试`,
+        );
       if (text.trim() === BLANK_PAGE_MARKER) {
         blankPages.push(page);
         continue;

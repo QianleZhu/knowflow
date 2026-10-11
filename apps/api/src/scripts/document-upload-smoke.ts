@@ -1,7 +1,7 @@
 import "../shared/config/load-env.js";
 import assert from "node:assert/strict";
 import { setTimeout as pause } from "node:timers/promises";
-import { db, closeDb, knowledgeBases, users, analyticsEvents } from "@knowflow/db";
+import { db, closeDb, knowledgeBases, analyticsEvents } from "@knowflow/db";
 import { eq, inArray, isNull } from "drizzle-orm";
 import {
   CSRF_HEADER_NAME,
@@ -176,46 +176,6 @@ async function main(): Promise<void> {
       finalDocument.errorMessage ?? "Worker 未完成测试文档",
     );
     assert.ok(finalDocument.parentChunkCount > 0 && finalDocument.childChunkCount > 0);
-    // 独立测试知识库使用不存在的模型，验证后续失败不抹去已完成步骤。
-    const [admin] = await db
-      .select({ id: users.id, departmentId: users.departmentId })
-      .from(users)
-      .where(eq(users.username, process.env["SEED_ADMIN_USER"] ?? "admin"))
-      .limit(1);
-    assert.ok(admin?.departmentId);
-    const [failureBase] = await db
-      .insert(knowledgeBases)
-      .values({
-        name: `upload-smoke-${crypto.randomUUID()}`,
-        creatorId: admin.id,
-        departmentId: admin.departmentId,
-        embeddingModel: "upload-smoke-nonexistent-model",
-      })
-      .returning({ id: knowledgeBases.id });
-    assert.ok(failureBase);
-    createdBases.add(failureBase.id);
-    const failureUpload = await upload(
-      failureBase.id,
-      `${content} failure`,
-      crypto.randomUUID(),
-      "failure.txt",
-    );
-    assert.ok(failureUpload.data);
-    let failedDocument = documentSchema.parse(await getData(`/documents/${failureUpload.data.id}`));
-    for (let index = 0; index < 60 && failedDocument.processStatus !== "failed"; index++) {
-      await pause(500);
-      failedDocument = documentSchema.parse(await getData(`/documents/${failureUpload.data.id}`));
-    }
-    assert.equal(failedDocument.processStatus, "failed");
-    assert.equal(failedDocument.parseStatus, "completed");
-    assert.equal(failedDocument.chunkStatus, "completed");
-    assert.equal(failedDocument.embeddingStatus, "failed");
-    const failureSnapshots = documentProgressListSchema.parse(
-      await getData(
-        `/knowledge-bases/${failureBase.id}/documents/progress-snapshot?ids=${failedDocument.id}`,
-      ),
-    );
-    assert.equal(failureSnapshots[0]?.failedStage, "embedding");
     console.log(
       JSON.stringify({
         sameKeyReplay: true,
@@ -225,7 +185,6 @@ async function main(): Promise<void> {
         crossBaseIsolation: true,
         sseSnapshotAndReconnect: true,
         unauthorizedRejected: true,
-        completedStagesPreservedOnFailure: true,
         processing: finalDocument.processStatus,
         parentChunks: finalDocument.parentChunkCount,
         childChunks: finalDocument.childChunkCount,

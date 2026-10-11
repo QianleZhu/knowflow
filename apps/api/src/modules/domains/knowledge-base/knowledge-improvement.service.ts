@@ -4,6 +4,7 @@ import {
   Inject,
   Injectable,
   NotFoundException,
+  ServiceUnavailableException,
 } from "@nestjs/common";
 import {
   answerFeedback,
@@ -68,7 +69,7 @@ import { createImprovementQueue } from "./knowledge-improvement-queue.js";
 const SCAN_LIMIT = 100;
 const RELATED_ITEM_LIMIT = 5;
 const VERIFICATION_DELAY_MS = 7 * 24 * 60 * 60 * 1000;
-const MODEL_CONFIG_ERROR = "请先在模型配置中配置知识生产模型";
+const MODEL_SERVICE_ERROR = "模型服务暂不可用，请联系系统管理员检查服务端配置";
 const DOCUMENT_EXTRACTION_TRIGGER_TYPE = "document_extraction" satisfies ImprovementTriggerType;
 const SCAN_SOURCE_TYPES = [
   "no_answer",
@@ -76,6 +77,14 @@ const SCAN_SOURCE_TYPES = [
   "item_feedback",
   DOCUMENT_EXTRACTION_TRIGGER_TYPE,
 ] as const;
+
+// 判断模型服务是否缺少环境凭据。
+function isModelServiceConfigurationError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  return error.message === "ALIYUN_API_KEY is not configured";
+}
 
 type TaskRow = typeof knowledgeImprovementTasks.$inferSelect;
 type ScanCursorRow = typeof knowledgeImprovementScanCursors.$inferSelect;
@@ -311,6 +320,7 @@ export class KnowledgeImprovementService {
               .map((task) => task.id),
           ),
         ];
+
         await this.enqueueGenerate(enqueueableTaskIds);
 
         result.created.push(...resolved.filter((item) => item.created).map((item) => item.task));
@@ -1244,6 +1254,7 @@ export class KnowledgeImprovementService {
     return false;
   }
 
+  // 依据改进任务与相关知识生成待审核的知识候选。
   private async generateDrafts(
     task: TaskRow,
     relatedItems: { title: string; content: string }[],
@@ -1282,9 +1293,8 @@ export class KnowledgeImprovementService {
         { temperature: 0.2, maxOutputTokens: 1800 },
       );
     } catch (error) {
-      const message = error instanceof Error ? error.message : "知识生产模型调用失败";
-      if (message.includes("knowledge_production") || message.includes("Model usage policy")) {
-        throw new BadRequestException(MODEL_CONFIG_ERROR);
+      if (isModelServiceConfigurationError(error)) {
+        throw new ServiceUnavailableException(MODEL_SERVICE_ERROR);
       }
       throw error;
     }
@@ -1292,6 +1302,7 @@ export class KnowledgeImprovementService {
     return [parseDraftResponse(response, this.draftParseContext(task))];
   }
 
+  // 从文档解析内容中生成待审核的知识候选。
   private async generateDocumentDraft(
     task: TaskRow,
     relatedItems: { title: string; content: string }[],
@@ -1342,9 +1353,8 @@ export class KnowledgeImprovementService {
         { temperature: 0.2, maxOutputTokens: 3600 },
       );
     } catch (error) {
-      const message = error instanceof Error ? error.message : "知识生产模型调用失败";
-      if (message.includes("knowledge_production") || message.includes("Model usage policy")) {
-        throw new BadRequestException(MODEL_CONFIG_ERROR);
+      if (isModelServiceConfigurationError(error)) {
+        throw new ServiceUnavailableException(MODEL_SERVICE_ERROR);
       }
       throw error;
     }

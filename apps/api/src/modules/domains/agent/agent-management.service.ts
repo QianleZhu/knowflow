@@ -80,6 +80,7 @@ export class AgentManagementService {
     };
   }
 
+  // 创建 Agent；模型由服务端按用途选择，不接受单 Agent 模型配置。
   async create(
     knowledgeBaseId: string,
     input: CreateManagedAgentRequest,
@@ -106,9 +107,6 @@ export class AgentManagementService {
           visibility: "knowledge_base_members",
           status: "draft",
           isDefault: false,
-          modelProvider: input.modelProvider ?? null,
-          modelName: input.modelName ?? null,
-          modelConfig: input.modelConfig ?? {},
           createdBy: user.id,
         })
         .returning();
@@ -185,6 +183,7 @@ export class AgentManagementService {
     return this.toManagedAgent(agent);
   }
 
+  // 更新 Agent 可编辑资料；模型策略由服务端统一决定。
   async update(
     agentId: string,
     input: UpdateManagedAgentRequest,
@@ -218,16 +217,6 @@ export class AgentManagementService {
     if (input.visibility !== undefined) {
       values.visibility = input.visibility;
     }
-    if (input.modelProvider !== undefined) {
-      values.modelProvider = input.modelProvider;
-    }
-    if (input.modelName !== undefined) {
-      values.modelName = input.modelName;
-    }
-    if (input.modelConfig !== undefined) {
-      values.modelConfig = input.modelConfig;
-    }
-
     const [updated] = await db
       .update(agents)
       .set({ ...values, forceCitation: true, updatedAt: new Date() })
@@ -541,6 +530,7 @@ export class AgentManagementService {
     return rows.map((row) => row.knowledgeBaseId);
   }
 
+  // 构造 Agent 管理响应，不向客户端暴露内部模型参数。
   private async toManagedAgent(agent: AgentRow): Promise<ManagedAgent> {
     return {
       id: agent.id,
@@ -558,12 +548,6 @@ export class AgentManagementService {
       answerStyle: agent.answerStyle,
       allowAttachments: agent.allowAttachments,
       forceCitation: agent.forceCitation,
-      modelProvider: agent.modelProvider,
-      modelName: agent.modelName,
-      modelConfig:
-        agent.modelConfig !== null && typeof agent.modelConfig === "object"
-          ? (agent.modelConfig as Record<string, unknown>)
-          : {},
       createdBy: agent.createdBy,
       publishedAt: agent.publishedAt?.toISOString() ?? null,
       createdAt: agent.createdAt.toISOString(),

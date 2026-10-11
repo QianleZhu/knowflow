@@ -106,35 +106,6 @@ export const agentStatusEnum = pgEnum("agent_status", [
   "disabled",
   "archived",
 ]);
-export const modelProviderTypeEnum = pgEnum("model_provider_type", [
-  "openai",
-  "azure_openai",
-  "aliyun",
-  "zhipu",
-  "deepseek",
-  "moonshot",
-  "ollama",
-  "openai_compatible",
-]);
-export const modelTypeEnum = pgEnum("model_type", [
-  "chat",
-  "embedding",
-  "rerank",
-  "ocr",
-  "vision",
-  "moderation",
-]);
-export const modelUsageTypeEnum = pgEnum("model_usage_type", [
-  "chat",
-  "query_understanding",
-  "document_processing",
-  "embedding",
-  "rerank",
-  "ocr",
-  "vision",
-  "knowledge_production",
-  "agent_generation",
-]);
 export const conversationStatusEnum = pgEnum("conversation_status", ["active", "archived"]);
 export const messageRoleEnum = pgEnum("message_role", ["user", "assistant", "system"]);
 export const confidenceLevelEnum = pgEnum("confidence_level", [
@@ -299,9 +270,6 @@ export const knowledgeBases = pgTable(
     creatorId: uuid("creator_id")
       .notNull()
       .references(() => users.id),
-    embeddingModel: varchar("embedding_model", { length: 120 })
-      .default("text-embedding-v4")
-      .notNull(),
     embeddingDimension: integer("embedding_dimension").default(1024).notNull(),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
     ...timestamps(),
@@ -740,9 +708,6 @@ export const agents = pgTable(
     visibility: agentVisibilityEnum("visibility").notNull(),
     status: agentStatusEnum("status").default("draft").notNull(),
     isDefault: boolean("is_default").default(false).notNull(),
-    modelProvider: varchar("model_provider", { length: 120 }),
-    modelName: varchar("model_name", { length: 120 }),
-    modelConfig: jsonb("model_config").default({}).notNull(),
     createdBy: uuid("created_by")
       .notNull()
       .references(() => users.id),
@@ -771,58 +736,6 @@ export const agentKnowledgeBases = pgTable(
   (table) => [
     uniqueIndex("agent_knowledge_bases_agent_kb_uidx").on(table.agentId, table.knowledgeBaseId),
   ],
-);
-
-export const modelProviders = pgTable("model_providers", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  name: varchar("name", { length: 120 }).notNull(),
-  providerType: modelProviderTypeEnum("provider_type").notNull(),
-  baseUrl: text("base_url").notNull(),
-  encryptedApiKey: text("encrypted_api_key"),
-  enabled: boolean("enabled").default(true).notNull(),
-  timeoutMs: integer("timeout_ms").default(30000).notNull(),
-  retryCount: integer("retry_count").default(2).notNull(),
-  concurrencyLimit: integer("concurrency_limit").default(5).notNull(),
-  dailyQuota: integer("daily_quota"),
-  remark: text("remark"),
-  ...timestamps(),
-});
-
-export const modelCatalog = pgTable(
-  "model_catalog",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    providerId: uuid("provider_id")
-      .notNull()
-      .references(() => modelProviders.id),
-    modelName: varchar("model_name", { length: 160 }).notNull(),
-    modelType: modelTypeEnum("model_type").notNull(),
-    contextWindow: integer("context_window"),
-    supportsStreaming: boolean("supports_streaming").default(false).notNull(),
-    enabled: boolean("enabled").default(true).notNull(),
-    ...timestamps(),
-  },
-  (table) => [
-    uniqueIndex("model_catalog_provider_model_uidx").on(table.providerId, table.modelName),
-  ],
-);
-
-export const modelUsagePolicies = pgTable(
-  "model_usage_policies",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    usageType: modelUsageTypeEnum("usage_type").notNull(),
-    defaultModelId: uuid("default_model_id").references(() => modelCatalog.id),
-    fallbackModelId: uuid("fallback_model_id").references(() => modelCatalog.id),
-    enabled: boolean("enabled").default(true).notNull(),
-    temperature: real("temperature").default(0.7).notNull(),
-    maxOutputTokens: integer("max_output_tokens"),
-    timeoutMs: integer("timeout_ms").default(30000).notNull(),
-    retryCount: integer("retry_count").default(2).notNull(),
-    quota: integer("quota"),
-    ...timestamps(),
-  },
-  (table) => [uniqueIndex("model_usage_policies_usage_type_uidx").on(table.usageType)],
 );
 
 export const conversations = pgTable(

@@ -61,7 +61,6 @@ type KnowledgeBaseRow = {
   indexStatus: KnowledgeBase["indexStatus"];
   creatorId: string;
   creatorName: string;
-  embeddingModel: string;
   embeddingDimension: number;
   deletedAt: Date | null;
   createdAt: Date;
@@ -94,6 +93,7 @@ export class KnowledgeBaseService {
     private readonly analytics: AnalyticsEventService,
   ) {}
 
+  // 按用户权限列出知识库，模型策略由服务端统一管理。
   async list(
     query: KnowledgeBaseListQuery,
     user: AuthenticatedUser,
@@ -110,7 +110,6 @@ export class KnowledgeBaseService {
         indexStatus: knowledgeBases.indexStatus,
         creatorId: knowledgeBases.creatorId,
         creatorName: creator.name,
-        embeddingModel: knowledgeBases.embeddingModel,
         embeddingDimension: knowledgeBases.embeddingDimension,
         deletedAt: knowledgeBases.deletedAt,
         createdAt: knowledgeBases.createdAt,
@@ -610,6 +609,7 @@ export class KnowledgeBaseService {
     throw new ForbiddenException("无权管理该知识库");
   }
 
+  // 按 ID 读取知识库记录；模型选择字段由系统内部统一处理。
   private async findRowById(
     id: string,
     options: { includeDeleted?: boolean } = {},
@@ -626,7 +626,6 @@ export class KnowledgeBaseService {
         indexStatus: knowledgeBases.indexStatus,
         creatorId: knowledgeBases.creatorId,
         creatorName: creator.name,
-        embeddingModel: knowledgeBases.embeddingModel,
         embeddingDimension: knowledgeBases.embeddingDimension,
         deletedAt: knowledgeBases.deletedAt,
         createdAt: knowledgeBases.createdAt,
@@ -736,6 +735,7 @@ export class KnowledgeBaseService {
     };
   }
 
+  // 将数据库记录转换为不暴露模型选择项的知识库响应。
   private toKnowledgeBase(row: KnowledgeBaseRow, canManage: boolean): KnowledgeBase {
     return {
       ...row,

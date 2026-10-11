@@ -16,8 +16,6 @@ export const SECURE_CSRF_COOKIE_NAME = "__Host-csrf";
 
 export const CSRF_HEADER_NAME = "X-CSRF-Token";
 
-export const DEFAULT_EMBEDDING_MODEL = "text-embedding-v4";
-
 export const DEFAULT_EMBEDDING_DIMENSION = 1024;
 
 export enum AuditTargetType {
@@ -103,31 +101,6 @@ export const ACTION_LABELS: Record<string, string> = {
 export const MIND_MAP_NODE_TYPES = ["kb", "document", "knowledge_item", "topic"] as const;
 
 export const MIND_MAP_NODE_STATUSES = ["draft", "published"] as const;
-
-export const MODEL_USAGE_TYPES = [
-  "chat",
-  "query_understanding",
-  "document_processing",
-  "embedding",
-  "rerank",
-  "ocr",
-  "vision",
-  "knowledge_production",
-  "agent_generation",
-] as const;
-
-export const MODEL_PROVIDER_TYPES = [
-  "openai",
-  "azure_openai",
-  "aliyun",
-  "zhipu",
-  "deepseek",
-  "moonshot",
-  "ollama",
-  "openai_compatible",
-] as const;
-
-export const MODEL_TYPES = ["chat", "embedding", "rerank", "ocr", "vision", "moderation"] as const;
 
 export const KNOWLEDGE_BASE_VISIBILITIES = ["public", "department", "restricted"] as const;
 
