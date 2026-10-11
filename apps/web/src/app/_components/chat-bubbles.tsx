@@ -1,16 +1,7 @@
-import {
-  HelpCircle,
-  AlertTriangle,
-  Compass,
-  ShieldAlert,
-  AlertCircle,
-  Bot,
-} from "lucide-react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import remarkMath from "remark-math";
-import rehypeKatex from "rehype-katex";
-import rehypeHighlight from "rehype-highlight";
+import { HelpCircle, AlertTriangle, Compass, ShieldAlert, AlertCircle, Bot } from "lucide-react";
+import { code } from "@streamdown/code";
+import { createMathPlugin } from "@streamdown/math";
+import { Streamdown, type Components, defaultUrlTransform } from "streamdown";
 import { type SyntheticEvent, useState } from "react";
 
 import {
@@ -25,6 +16,111 @@ import { Checkbox } from "../../components/ui/checkbox";
 import { Dialog } from "../../components/ui/dialog";
 import { cn } from "../../lib/cn";
 
+// 固定插件实例，避免流式更新时因配置对象变化而让已解析块失去缓存。
+const MARKDOWN_PLUGINS = {
+  code,
+  math: createMathPlugin({ singleDollarTextMath: true }),
+};
+
+// 保留当前聊天答案的排版样式，并让链接继续使用安全的新窗口行为。
+const MARKDOWN_COMPONENTS: Components = {
+  // 为段落保留聊天正文的紧凑行距。
+  p: (props) => {
+    const { node: _node, ...rest } = props;
+    void _node;
+    return <p className="mb-2 last:mb-0" {...rest} />;
+  },
+  // 为无序列表保留清楚的缩进和条目间距。
+  ul: (props) => {
+    const { node: _node, ...rest } = props;
+    void _node;
+    return <ul className="mb-2 ml-5 list-disc space-y-1" {...rest} />;
+  },
+  // 为有序列表保留清楚的缩进和条目间距。
+  ol: (props) => {
+    const { node: _node, ...rest } = props;
+    void _node;
+    return <ol className="mb-2 ml-5 list-decimal space-y-1" {...rest} />;
+  },
+  // 让列表项沿用浏览器语义和 Streamdown 的安全处理。
+  li: (props) => {
+    const { node: _node, ...rest } = props;
+    void _node;
+    return <li {...rest} />;
+  },
+  // 为一级标题保留答案内标题的层级和间距。
+  h1: (props) => {
+    const { node: _node, ...rest } = props;
+    void _node;
+    return <h1 className="mb-3 mt-5 text-xl font-bold text-ink" {...rest} />;
+  },
+  // 为二级标题保留答案内标题的层级和间距。
+  h2: (props) => {
+    const { node: _node, ...rest } = props;
+    void _node;
+    return <h2 className="mb-3 mt-4 text-lg font-bold text-ink" {...rest} />;
+  },
+  // 为三级标题保留答案内标题的层级和间距。
+  h3: (props) => {
+    const { node: _node, ...rest } = props;
+    void _node;
+    return <h3 className="mb-2 mt-4 text-base font-semibold text-ink" {...rest} />;
+  },
+  // 为四级标题保留答案内标题的层级和间距。
+  h4: (props) => {
+    const { node: _node, ...rest } = props;
+    void _node;
+    return <h4 className="mb-2 mt-3 text-sm font-semibold text-ink" {...rest} />;
+  },
+  // 限制答案链接的跳转上下文，避免新页面取得当前窗口引用。
+  a: (props) => {
+    const { node: _node, ...rest } = props;
+    void _node;
+    return (
+      <a
+        className="font-medium text-brand-600 underline underline-offset-4 transition-colors hover:text-brand-700"
+        target="_blank"
+        rel="noopener noreferrer"
+        {...rest}
+      />
+    );
+  },
+  // 为强调文本保留品牌正文颜色。
+  strong: (props) => {
+    const { node: _node, ...rest } = props;
+    void _node;
+    return <strong className="font-bold text-ink" {...rest} />;
+  },
+  // 为代码块保留横向滚动容器和浅色背景。
+  pre: (props) => {
+    const { node: _node, ...rest } = props;
+    void _node;
+    return (
+      <pre
+        className="my-4 overflow-x-auto rounded-xl border border-border/80 bg-neutral-50 p-4 text-sm shadow-sm"
+        {...rest}
+      />
+    );
+  },
+  // 为行内代码保留紧凑底色，同时不覆盖代码插件的语法颜色。
+  code: (props) => {
+    const { node: _node, className, children, ...rest } = props;
+    void _node;
+    return !className ? (
+      <code
+        className="rounded-md border border-border/50 bg-neutral-100/80 px-1.5 py-0.5 font-mono text-sm text-brand-700"
+        {...rest}
+      >
+        {children}
+      </code>
+    ) : (
+      <code className={className} {...rest}>
+        {children}
+      </code>
+    );
+  },
+};
+
 export type DraftAssistantMessage = {
   id: string;
   conversationId: string;
@@ -33,6 +129,7 @@ export type DraftAssistantMessage = {
   noAnswerType: NoAnswerType | null;
   recommendedQuestions: string[];
   createdAt: string;
+  completionState?: "cancelled" | "failed";
 };
 
 export type DisplayMessage = ConversationMessage | DraftAssistantMessage;
@@ -105,13 +202,14 @@ export function UserBubble({
           onClick={onOpenTrace}
           className="rounded-md px-2 py-1 text-xs text-ink-subtle transition-colors hover:bg-neutral-100 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
         >
-          查看失败运行详情
+          {trace.status === "cancelled" ? "查看已停止运行详情" : "查看失败运行详情"}
         </button>
       ) : null}
     </div>
   );
 }
 
+// 渲染助手回答、流式 Markdown、运行状态和消息操作。
 export function AssistantBubble({
   message,
   isStreaming,
@@ -136,6 +234,7 @@ export function AssistantBubble({
   onOpenTrace?: (() => void) | undefined;
 }) {
   const showSkeleton = isStreaming && message.content === "";
+  const isPartialAnswer = "completionState" in message;
   return (
     <div className="flex flex-col gap-2 animate-in fade-in slide-in-from-bottom-2 duration-300 ease-out fill-mode-both">
       <div className="flex items-start gap-3">
@@ -144,25 +243,28 @@ export function AssistantBubble({
         </div>
         <div className="min-w-0 flex-1">
           {/* noAnswerType 提示 */}
-          {!showSkeleton && message.noAnswerType ? (
-            (() => {
-              const meta = noAnswerMeta[message.noAnswerType];
-              const Icon = meta.icon;
-              return (
-                <div className={cn("mb-3 flex items-start gap-2.5 rounded-lg border p-3 text-sm transition-all shadow-xs", meta.bgCls)}>
-                  <Icon className={cn("mt-0.5 size-4 shrink-0", meta.textCls)} />
-                  <div className="flex-1">
-                    <span className={cn("font-semibold block", meta.textCls)}>
-                      {meta.label}
-                    </span>
-                    <span className="text-ink-muted text-xs mt-0.5 block">
-                      {meta.description}
-                    </span>
+          {!showSkeleton && message.noAnswerType
+            ? (() => {
+                const meta = noAnswerMeta[message.noAnswerType];
+                const Icon = meta.icon;
+                return (
+                  <div
+                    className={cn(
+                      "mb-3 flex items-start gap-2.5 rounded-lg border p-3 text-sm transition-all shadow-xs",
+                      meta.bgCls,
+                    )}
+                  >
+                    <Icon className={cn("mt-0.5 size-4 shrink-0", meta.textCls)} />
+                    <div className="flex-1">
+                      <span className={cn("font-semibold block", meta.textCls)}>{meta.label}</span>
+                      <span className="text-ink-muted text-xs mt-0.5 block">
+                        {meta.description}
+                      </span>
+                    </div>
                   </div>
-                </div>
-              );
-            })()
-          ) : null}
+                );
+              })()
+            : null}
 
           {showSkeleton ? (
             <p className="flex items-center gap-2 text-sm text-ink-muted">
@@ -175,85 +277,34 @@ export function AssistantBubble({
             </p>
           ) : (
             <div className="text-base leading-relaxed text-ink">
-              <ReactMarkdown
-                remarkPlugins={[remarkGfm, remarkMath]}
-                rehypePlugins={[rehypeKatex, rehypeHighlight]}
-                components={{
-                  p: (props) => {
-                    
-                    const { node: _node, ..._rest } = props; void _node;
-                    return <p className="mb-2 last:mb-0" {..._rest} />;
-                  },
-                  ul: (props) => {
-                    
-                    const { node: _node, ..._rest } = props; void _node;
-                    return <ul className="mb-2 ml-5 list-disc space-y-1" {..._rest} />;
-                  },
-                  ol: (props) => {
-                    
-                    const { node: _node, ..._rest } = props; void _node;
-                    return <ol className="mb-2 ml-5 list-decimal space-y-1" {..._rest} />;
-                  },
-                  li: (props) => {
-                    
-                    const { node: _node, ..._rest } = props; void _node;
-                    return <li {..._rest} />;
-                  },
-                  h1: (props) => {
-                    
-                    const { node: _node, ..._rest } = props; void _node;
-                    return <h1 className="mb-3 mt-5 text-xl font-bold text-ink" {..._rest} />;
-                  },
-                  h2: (props) => {
-                    
-                    const { node: _node, ..._rest } = props; void _node;
-                    return <h2 className="mb-3 mt-4 text-lg font-bold text-ink" {..._rest} />;
-                  },
-                  h3: (props) => {
-                    
-                    const { node: _node, ..._rest } = props; void _node;
-                    return <h3 className="mb-2 mt-4 text-base font-semibold text-ink" {..._rest} />;
-                  },
-                  h4: (props) => {
-                    
-                    const { node: _node, ..._rest } = props; void _node;
-                    return <h4 className="mb-2 mt-3 text-sm font-semibold text-ink" {..._rest} />;
-                  },
-                  a: (props) => {
-                    const { node: _node, ..._rest } = props; void _node;
-                    return <a className="font-medium text-brand-600 underline underline-offset-4 transition-colors hover:text-brand-700" target="_blank" rel="noopener noreferrer" {..._rest} />;
-                  },
-                  strong: (props) => {
-                    const { node: _node, ..._rest } = props; void _node;
-                    return <strong className="font-bold text-ink" {..._rest} />;
-                  },
-                  pre: (props) => {
-                    const { node: _node, ..._rest } = props; void _node;
-                    return <pre className="my-4 overflow-x-auto rounded-xl border border-border/80 bg-neutral-50 p-4 text-sm shadow-sm" {..._rest} />;
-                  },
-                  code: (props) => {
-                    const { node: _node, className, children, ..._rest } = props; void _node;
-                    return !className ? (
-                      <code className="rounded-md border border-border/50 bg-neutral-100/80 px-1.5 py-0.5 font-mono text-sm text-brand-700" {..._rest}>
-                        {children}
-                      </code>
-                    ) : (
-                      <code className={className} {..._rest}>
-                        {children}
-                      </code>
-                    );
-                  },
-                }}
+              <Streamdown
+                mode={isStreaming || isPartialAnswer ? "streaming" : "static"}
+                isAnimating={isStreaming}
+                plugins={MARKDOWN_PLUGINS}
+                components={MARKDOWN_COMPONENTS}
+                skipHtml
+                urlTransform={defaultUrlTransform}
               >
                 {message.content}
-              </ReactMarkdown>
+              </Streamdown>
             </div>
           )}
 
+          {isPartialAnswer ? (
+            <p className="mt-2 text-xs text-warning" role="status">
+              {message.completionState === "cancelled"
+                ? "已停止生成；这段未完成内容暂未保存到会话历史。"
+                : "回答连接中断；这段未完成内容暂未保存到会话历史。"}
+            </p>
+          ) : null}
+
           {/* 操作按钮 */}
-          {!message.id.startsWith("draft-") ? (
+          {!message.id.startsWith("draft-") && !isPartialAnswer ? (
             <div className="mt-2 flex items-center gap-1">
-              <IconAction label="复制" onClick={() => void navigator.clipboard.writeText(message.content)} />
+              <IconAction
+                label="复制"
+                onClick={() => void navigator.clipboard.writeText(message.content)}
+              />
               {trace !== undefined && onOpenTrace !== undefined ? (
                 <IconAction label="运行详情" onClick={onOpenTrace} />
               ) : null}
@@ -316,7 +367,9 @@ export function IconAction({
       disabled={disabled}
       className={cn(
         "rounded-md px-2 py-1 text-xs transition-colors duration-150",
-        active ? "bg-brand-50 text-brand-700" : "text-ink-subtle hover:bg-neutral-100 hover:text-ink",
+        active
+          ? "bg-brand-50 text-brand-700"
+          : "text-ink-subtle hover:bg-neutral-100 hover:text-ink",
         disabled && !active ? "cursor-not-allowed opacity-50" : "",
       )}
     >
