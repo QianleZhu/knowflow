@@ -19,19 +19,26 @@ export default function ChatPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const refreshConversations = useCallback(async (status: "active" | "archived") => {
-    if (globalAgentId === "") return [];
-    try {
-      const response = await apiRequest(`/conversations?status=${status}`, conversationListResponseSchema, {
-        cache: "no-store",
-      });
-      const list = response.items.filter((c) => c.agentId === globalAgentId);
-      setConversations(list);
-      return list;
-    } catch {
-      return [];
-    }
-  }, [globalAgentId]);
+  const refreshConversations = useCallback(
+    async (status: "active" | "archived") => {
+      if (globalAgentId === "") return [];
+      try {
+        const response = await apiRequest(
+          `/conversations?status=${status}`,
+          conversationListResponseSchema,
+          {
+            cache: "no-store",
+          },
+        );
+        const list = response.items.filter((c) => c.agentId === globalAgentId);
+        setConversations(list);
+        return list;
+      } catch {
+        return [];
+      }
+    },
+    [globalAgentId],
+  );
 
   const chatHook = useAgentChat({
     agentId: globalAgentId,
@@ -42,16 +49,18 @@ export default function ChatPage() {
         void refreshConversations("active");
       }
     },
-    onStreamCompleted: () => {
+    onStreamFinished: () => {
       void refreshConversations("active");
-    }
+    },
   });
 
   const loadInitialData = useCallback(async () => {
     setIsLoading(true);
     setError(null);
     try {
-      const agentResponse = await apiRequest("/agents", agentListResponseSchema, { cache: "no-store" });
+      const agentResponse = await apiRequest("/agents", agentListResponseSchema, {
+        cache: "no-store",
+      });
       const globalAgent =
         agentResponse.items.find((agent: Agent) => agent.type === "global") ??
         agentResponse.items.find((agent: Agent) => agent.isDefault) ??

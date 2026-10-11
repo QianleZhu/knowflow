@@ -10,6 +10,7 @@ import {
   type FeedbackRating,
 } from "@knowflow/shared";
 import { apiRequest, apiUrl, getCsrfToken, parseApiError, refreshAccess } from "../../lib/api";
+import { StreamDeltaBuffer } from "../../lib/stream-delta-buffer";
 import { type DisplayMessage, type DraftAssistantMessage } from "../_components/chat-bubbles";
 
 const emptyObjectSchema = {
@@ -30,16 +31,17 @@ export function parseSseEvent(chunk: string): AskStreamEvent | null {
   return askStreamEventSchema.parse(parsed);
 }
 
+// 管理聊天会话、SSE 流生命周期、增量缓冲和用户主动中断。
 export function useAgentChat({
   agentId,
   initialConversationId = "",
   onConversationCreated,
-  onStreamCompleted,
+  onStreamFinished,
 }: {
   agentId: string;
   initialConversationId?: string;
   onConversationCreated?: (id: string) => void;
-  onStreamCompleted?: () => void;
+  onStreamFinished?: (result: "completed" | "failed" | "cancelled") => void;
 }) {
   const [selectedConversationId, setSelectedConversationIdState] = useState(initialConversationId);
   const [messages, setMessages] = useState<DisplayMessage[]>([]);
@@ -55,23 +57,71 @@ export function useAgentChat({
   const listEndRef = useRef<HTMLDivElement>(null);
   const prevMessagesLenRef = useRef(0);
   const streamingRef = useRef(false);
+  const askingRef = useRef(false);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const userStopControllerRef = useRef<AbortController | null>(null);
+  const deltaBufferRef = useRef<StreamDeltaBuffer | null>(null);
   // 始终指向「当前选中会话」与「在途流所属会话」，供流事件归属校验与切换中断使用
   const selectedConversationIdRef = useRef(selectedConversationId);
   selectedConversationIdRef.current = selectedConversationId;
   const streamConversationIdRef = useRef<string | null>(null);
 
-  // 中断在途流（切换/清空会话、切 Agent、卸载时）：清空状态以便新会话加载
+  // 将同一帧中收集的 delta 合并成一次消息状态更新。
+  const appendStreamDelta = useCallback((draftId: string, delta: string) => {
+    deltaBufferRef.current ??= new StreamDeltaBuffer((messageId, mergedDelta) => {
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === messageId
+            ? { ...message, content: `${message.content}${mergedDelta}` }
+            : message,
+        ),
+      );
+    });
+    deltaBufferRef.current.append(draftId, delta);
+  }, []);
+
+  // 立即提交暂存内容，避免完成或用户停止时丢掉最后一帧。
+  const flushStreamDeltas = useCallback(() => {
+    deltaBufferRef.current?.flush();
+  }, []);
+
+  // 丢弃会话切换后已不属于当前视图的待提交增量。
+  const clearStreamDeltas = useCallback(() => {
+    deltaBufferRef.current?.clear();
+  }, []);
+
+  // 把未持久化的回答草稿标成中断或失败，并保留已收到的正文。
+  const finishDraftMessage = useCallback(
+    (draftId: string, completionState: "cancelled" | "failed") => {
+      const localId = draftId.slice("draft-".length);
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === draftId && message.role === "assistant"
+            ? {
+                ...message,
+                id: `${completionState}-${localId}`,
+                completionState,
+              }
+            : message,
+        ),
+      );
+    },
+    [],
+  );
+
+  // 中断在途流（切换/清空会话、切 Agent、卸载时）：清空状态以便新会话加载。
   const abortInFlightStream = useCallback(() => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
-    }
+    const controller = abortControllerRef.current;
+    abortControllerRef.current = null;
+    userStopControllerRef.current = null;
+    controller?.abort();
+    clearStreamDeltas();
+    askingRef.current = false;
     streamingRef.current = false;
     streamConversationIdRef.current = null;
     setIsAsking(false);
     setStatusText("");
-  }, []);
+  }, [clearStreamDeltas]);
 
   // 包装会话切换：切到「非在途流所属」的会话时中断旧流，避免旧流串台写入新会话
   const setSelectedConversationId = useCallback(
@@ -167,17 +217,20 @@ export function useAgentChat({
 
   async function ask(raw: string) {
     const trimmed = raw.trim();
-    if (trimmed === "" || isAsking || agentId === "") {
+    if (trimmed === "" || askingRef.current || agentId === "") {
       return;
     }
+    askingRef.current = true;
     setIsAsking(true);
     setError(null);
     setQuestion("");
     streamingRef.current = true;
     const controller = new AbortController();
     abortControllerRef.current = controller;
+    let activeDraftId: string | null = null;
     try {
       const conversationId = await ensureConversation();
+      controller.signal.throwIfAborted();
       const now = new Date().toISOString();
       const localId = crypto.randomUUID();
       const userMessage: DisplayMessage = {
@@ -200,20 +253,36 @@ export function useAgentChat({
         recommendedQuestions: [],
         createdAt: now,
       };
+      activeDraftId = draft.id;
       setMessages((current) => [...current, userMessage, draft]);
       streamConversationIdRef.current = conversationId;
-      await streamAnswer(conversationId, trimmed, draft.id, controller.signal);
-      onStreamCompleted?.();
+      const result = await streamAnswer(conversationId, trimmed, draft.id, controller.signal);
+      onStreamFinished?.(result);
     } catch (caught) {
-      if (caught instanceof Error && caught.name === "AbortError") {
+      if (controller.signal.aborted || (caught instanceof Error && caught.name === "AbortError")) {
+        if (userStopControllerRef.current === controller) {
+          if (activeDraftId !== null) {
+            flushStreamDeltas();
+            finishDraftMessage(activeDraftId, "cancelled");
+          }
+          userStopControllerRef.current = null;
+          onStreamFinished?.("cancelled");
+        }
         return;
       }
+      if (activeDraftId !== null) {
+        flushStreamDeltas();
+        finishDraftMessage(activeDraftId, "failed");
+      }
       setError(caught instanceof Error ? caught.message : "提问失败");
+      onStreamFinished?.("failed");
     } finally {
       // 仅当 abortController 仍是本次创建的那个时才复位（切换/新流会替换它，旧流 finally 不误清）
       if (abortControllerRef.current === controller) {
+        flushStreamDeltas();
         setIsAsking(false);
         setStatusText("");
+        askingRef.current = false;
         streamingRef.current = false;
         abortControllerRef.current = null;
         streamConversationIdRef.current = null;
@@ -221,12 +290,22 @@ export function useAgentChat({
     }
   }
 
+  // 请求中止信号并保留当前已到达的回答内容。
+  const stopGenerating = useCallback(() => {
+    const controller = abortControllerRef.current;
+    if (controller === null || !askingRef.current) return;
+    userStopControllerRef.current = controller;
+    flushStreamDeltas();
+    setStatusText("正在停止生成");
+    controller.abort();
+  }, [flushStreamDeltas]);
+
   async function streamAnswer(
     conversationId: string,
     content: string,
     draftId: string,
     signal: AbortSignal,
-  ) {
+  ): Promise<"completed" | "failed"> {
     const doFetch = () =>
       fetch(apiUrl(`/conversations/${conversationId}/messages`), {
         method: "POST",
@@ -253,6 +332,7 @@ export function useAgentChat({
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
+    let terminalResult: "completed" | "failed" | null = null;
 
     try {
       let result = await reader.read();
@@ -268,15 +348,32 @@ export function useAgentChat({
           const event = parseSseEvent(part);
           if (event !== null) {
             handleStreamEvent(event, draftId, conversationId);
+            if (event.type === "agent.completed") terminalResult = "completed";
+            if (event.type === "agent.failed") terminalResult = "failed";
           }
         }
         result = await reader.read();
       }
+      buffer += decoder.decode();
+      if (buffer.trim().length > 0) {
+        const event = parseSseEvent(buffer);
+        if (event !== null) {
+          handleStreamEvent(event, draftId, conversationId);
+          if (event.type === "agent.completed") terminalResult = "completed";
+          if (event.type === "agent.failed") terminalResult = "failed";
+        }
+      }
+    } catch (error) {
+      // 服务端终态事件已到达时，忽略随后用户取消读取造成的关闭异常。
+      if (terminalResult === null) throw error;
     } finally {
       if (signal.aborted) {
         await reader.cancel();
       }
     }
+    if (terminalResult !== null) return terminalResult;
+    signal.throwIfAborted();
+    throw new Error("流式连接意外中断，已收到的回答内容已保留，请重试。");
   }
 
   function handleStreamEvent(event: AskStreamEvent, draftId: string, streamConversationId: string) {
@@ -307,18 +404,16 @@ export function useAgentChat({
         break;
       }
       case "agent.answer.delta":
-        setMessages((current) =>
-          current.map((m) =>
-            m.id === draftId ? { ...m, content: `${m.content}${event.delta}` } : m,
-          ),
-        );
+        appendStreamDelta(draftId, event.delta);
         break;
-      case "agent.completed":
+      case "agent.completed": {
+        flushStreamDeltas();
         setMessages((current) => current.map((m) => (m.id === draftId ? event.message : m)));
         break;
+      }
       case "agent.failed":
-        // 移除空白 draft，避免流结束后残留空气泡；错误提示统一在顶部展示
-        setMessages((current) => current.filter((m) => m.id !== draftId));
+        flushStreamDeltas();
+        finishDraftMessage(draftId, "failed");
         setError(event.message);
         break;
       default:
@@ -371,6 +466,7 @@ export function useAgentChat({
     error,
     setError,
     isAsking,
+    stopGenerating,
     feedbackByMessageId,
     correctionFor,
     setCorrectionFor,

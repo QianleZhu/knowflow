@@ -1,7 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { agentListResponseSchema, conversationListResponseSchema, type Agent, type Conversation } from "@knowflow/shared";
+import {
+  agentListResponseSchema,
+  conversationListResponseSchema,
+  type Agent,
+  type Conversation,
+} from "@knowflow/shared";
 import { apiRequest } from "../../../../lib/api";
 import {
   Select,
@@ -27,9 +32,13 @@ export function TabChat({ knowledgeBaseId }: { knowledgeBaseId: string }) {
       setLoadingAgents(true);
       setError(null);
       try {
-        const response = await apiRequest(`/agents?knowledgeBaseId=${knowledgeBaseId}`, agentListResponseSchema, {
-          cache: "no-store",
-        });
+        const response = await apiRequest(
+          `/agents?knowledgeBaseId=${knowledgeBaseId}`,
+          agentListResponseSchema,
+          {
+            cache: "no-store",
+          },
+        );
         setAgents(response.items);
         if (response.items.length > 0) {
           const defaultAgent = response.items.find((a: Agent) => a.isDefault) ?? response.items[0];
@@ -46,20 +55,27 @@ export function TabChat({ knowledgeBaseId }: { knowledgeBaseId: string }) {
     void loadAgents();
   }, [knowledgeBaseId]);
 
-  const refreshConversations = useCallback(async (status: "active" | "archived") => {
-    if (selectedAgentId === "") return [];
-    try {
-      const response = await apiRequest(`/conversations?status=${status}`, conversationListResponseSchema, {
-        cache: "no-store",
-      });
-      // 每个 agent 对应自己的会话列表：只显示当前选中 agent 的会话（与全局 /agents 页一致）
-      const list = response.items.filter((c) => c.agentId === selectedAgentId);
-      setConversations(list);
-      return list;
-    } catch {
-      return [];
-    }
-  }, [selectedAgentId]);
+  const refreshConversations = useCallback(
+    async (status: "active" | "archived") => {
+      if (selectedAgentId === "") return [];
+      try {
+        const response = await apiRequest(
+          `/conversations?status=${status}`,
+          conversationListResponseSchema,
+          {
+            cache: "no-store",
+          },
+        );
+        // 每个 agent 对应自己的会话列表：只显示当前选中 agent 的会话（与全局 /agents 页一致）
+        const list = response.items.filter((c) => c.agentId === selectedAgentId);
+        setConversations(list);
+        return list;
+      } catch {
+        return [];
+      }
+    },
+    [selectedAgentId],
+  );
 
   useEffect(() => {
     if (!loadingAgents && selectedAgentId !== "") {
@@ -79,15 +95,15 @@ export function TabChat({ knowledgeBaseId }: { knowledgeBaseId: string }) {
         void refreshConversations("active");
       }
     },
-    onStreamCompleted: () => {
+    onStreamFinished: () => {
       void refreshConversations("active");
-    }
+    },
   });
 
   // Sync selectedAgentId when a conversation is selected
   useEffect(() => {
     if (chatHook.selectedConversationId) {
-      const conv = conversations.find(c => c.id === chatHook.selectedConversationId);
+      const conv = conversations.find((c) => c.id === chatHook.selectedConversationId);
       if (conv && conv.agentId !== selectedAgentId) {
         setSelectedAgentId(conv.agentId);
       }
@@ -131,7 +147,11 @@ export function TabChat({ knowledgeBaseId }: { knowledgeBaseId: string }) {
       agentSelector={agentSelector}
       showArchive={true}
       emptyStateTitle={agents.length === 0 ? "该知识库暂无可用专家 Agent" : "开始提问"}
-      emptyStateDescription={agents.length === 0 ? "请联系管理员在「专家 Agent 管理」标签页创建并发布。" : "该专家 Agent 熟知本知识库内容，向它提问吧。"}
+      emptyStateDescription={
+        agents.length === 0
+          ? "请联系管理员在「专家 Agent 管理」标签页创建并发布。"
+          : "该专家 Agent 熟知本知识库内容，向它提问吧。"
+      }
       chatHook={chatHook}
     />
   );
