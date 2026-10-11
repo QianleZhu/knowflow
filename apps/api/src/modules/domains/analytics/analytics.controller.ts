@@ -14,9 +14,11 @@ import {
   analyticsOverviewResponseSchema,
   analyticsRangeQuerySchema,
   knowledgeBaseAnalyticsResponseSchema,
+  modelUsageAnalyticsResponseSchema,
   uuidParamSchema,
   type AnalyticsOverviewResponse,
   type KnowledgeBaseAnalyticsResponse,
+  type ModelUsageAnalyticsResponse,
 } from "@knowflow/shared";
 
 import type { AuthenticatedUser } from "../auth/auth.types.js";
@@ -60,6 +62,19 @@ export class AnalyticsController {
       this.requireUser(request),
     );
     return { ok: true, data: analyticsOverviewResponseSchema.parse(data) };
+  }
+
+  // 为超管统计页提供脱敏的模型 Token 与标准价估算成本汇总。
+  @Get("analytics/model-usage")
+  async getModelUsageAnalytics(
+    @Query() query: unknown,
+    @Req() request: AuthenticatedRequest,
+  ): Promise<{ ok: true; data: ModelUsageAnalyticsResponse }> {
+    const data = await this.analyticsService.getModelUsageAnalytics(
+      analyticsRangeQuerySchema.parse(query),
+      this.requireUser(request),
+    );
+    return { ok: true, data: modelUsageAnalyticsResponseSchema.parse(data) };
   }
 
   @Post("analytics/events")

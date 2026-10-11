@@ -6,6 +6,7 @@ import {
   index,
   integer,
   jsonb,
+  numeric,
   pgEnum,
   pgTable,
   real,
@@ -854,12 +855,16 @@ export const analyticsEvents = pgTable(
   ],
 );
 
+// 保存以单条用户查询为单位的 Agent Trace 根记录和汇总用量。
 export const agentRuntimeTraces = pgTable(
   "agent_runtime_traces",
   {
     id: uuid("id").primaryKey().defaultRandom(),
     agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
     conversationId: uuid("conversation_id").references(() => conversations.id, {
+      onDelete: "cascade",
+    }),
+    userMessageId: uuid("user_message_id").references(() => conversationMessages.id, {
       onDelete: "set null",
     }),
     messageId: uuid("message_id").references(() => conversationMessages.id, {
@@ -877,11 +882,79 @@ export const agentRuntimeTraces = pgTable(
     citations: jsonb("citations").default([]).notNull(),
     confidenceLevel: confidenceLevelEnum("confidence_level"),
     noAnswerType: noAnswerTypeEnum("no_answer_type"),
+    status: varchar("status", { length: 24 }).default("completed").notNull(),
     latencyMs: integer("latency_ms"),
+    inputTokens: integer("input_tokens").default(0).notNull(),
+    outputTokens: integer("output_tokens").default(0).notNull(),
+    unknownUsageCount: integer("unknown_usage_count").default(0).notNull(),
+    estimatedCostCny: numeric("estimated_cost_cny", { precision: 20, scale: 12 }),
     error: text("error"),
     ...createdOnly(),
   },
-  (table) => [index("agent_runtime_traces_agent_idx").on(table.agentId)],
+  (table) => [
+    index("agent_runtime_traces_agent_idx").on(table.agentId),
+    index("agent_runtime_traces_conversation_created_idx").on(
+      table.conversationId,
+      table.createdAt,
+    ),
+    index("agent_runtime_traces_created_idx").on(table.createdAt),
+    uniqueIndex("agent_runtime_traces_user_message_uidx").on(table.userMessageId),
+  ],
+);
+
+// 保存单次 Agent 调用的步骤、模型、耗时和 Token/成本统计。
+export const agentRuntimeTraceSpans = pgTable(
+  "agent_runtime_trace_spans",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    traceId: uuid("trace_id")
+      .notNull()
+      .references(() => agentRuntimeTraces.id, { onDelete: "cascade" }),
+    parentSpanId: uuid("parent_span_id").references(
+      (): AnyPgColumn => agentRuntimeTraceSpans.id,
+      { onDelete: "cascade" },
+    ),
+    sequence: integer("sequence").notNull(),
+    name: varchar("name", { length: 120 }).notNull(),
+    kind: varchar("kind", { length: 40 }).notNull(),
+    status: varchar("status", { length: 24 }).default("running").notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true }).defaultNow().notNull(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    durationMs: integer("duration_ms"),
+    model: varchar("model", { length: 160 }),
+    inputTokens: integer("input_tokens"),
+    outputTokens: integer("output_tokens"),
+    usageSource: varchar("usage_source", { length: 24 }),
+    estimatedCostCny: numeric("estimated_cost_cny", { precision: 20, scale: 12 }),
+    priceSnapshot: jsonb("price_snapshot").default({}).notNull(),
+    error: text("error"),
+    ...createdOnly(),
+  },
+  (table) => [
+    uniqueIndex("agent_runtime_trace_spans_trace_sequence_uidx").on(
+      table.traceId,
+      table.sequence,
+    ),
+    index("agent_runtime_trace_spans_parent_idx").on(table.parentSpanId),
+    index("agent_runtime_trace_spans_model_created_idx").on(table.model, table.createdAt),
+  ],
+);
+
+// 按 Span 保存创建者可查看的原始请求、检索结果与模型响应。
+export const agentRuntimeTracePayloads = pgTable(
+  "agent_runtime_trace_payloads",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    spanId: uuid("span_id")
+      .notNull()
+      .references(() => agentRuntimeTraceSpans.id, { onDelete: "cascade" }),
+    payloadType: varchar("payload_type", { length: 80 }).notNull(),
+    payload: jsonb("payload").notNull(),
+    ...createdOnly(),
+  },
+  (table) => [
+    index("agent_runtime_trace_payloads_span_type_idx").on(table.spanId, table.payloadType),
+  ],
 );
 
 export const backgroundJobs = pgTable(

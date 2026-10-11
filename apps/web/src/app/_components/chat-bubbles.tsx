@@ -14,6 +14,7 @@ import rehypeHighlight from "rehype-highlight";
 import { type SyntheticEvent, useState } from "react";
 
 import {
+  type AgentTraceSummary,
   type ConversationMessage,
   type FeedbackRating,
   type NoAnswerType,
@@ -83,12 +84,30 @@ export const noAnswerMeta: Record<
   },
 };
 
-export function UserBubble({ content }: { content: string }) {
+// 在用户查询旁显示失败运行的详情入口；成功运行入口放在对应助手回答上。
+export function UserBubble({
+  content,
+  trace,
+  onOpenTrace,
+}: {
+  content: string;
+  trace?: AgentTraceSummary | undefined;
+  onOpenTrace?: (() => void) | undefined;
+}) {
   return (
-    <div className="flex justify-end animate-in fade-in slide-in-from-bottom-2 duration-300 ease-out fill-mode-both">
+    <div className="flex flex-col items-end gap-1 animate-in fade-in slide-in-from-bottom-2 duration-300 ease-out fill-mode-both">
       <div className="max-w-[80%] rounded-2xl rounded-tr-sm bg-brand-600 px-4 py-2.5 text-base whitespace-pre-wrap text-white shadow-sm shadow-brand-500/20">
         {content}
       </div>
+      {trace !== undefined && onOpenTrace !== undefined ? (
+        <button
+          type="button"
+          onClick={onOpenTrace}
+          className="rounded-md px-2 py-1 text-xs text-ink-subtle transition-colors hover:bg-neutral-100 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500"
+        >
+          查看失败运行详情
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -102,6 +121,8 @@ export function AssistantBubble({
   onCorrection,
   onRegenerate,
   onAskRecommended,
+  trace,
+  onOpenTrace,
 }: {
   message: DisplayMessage;
   isStreaming: boolean;
@@ -111,6 +132,8 @@ export function AssistantBubble({
   onCorrection: () => void;
   onRegenerate: () => void;
   onAskRecommended: (q: string) => void;
+  trace?: AgentTraceSummary | undefined;
+  onOpenTrace?: (() => void) | undefined;
 }) {
   const showSkeleton = isStreaming && message.content === "";
   return (
@@ -231,6 +254,9 @@ export function AssistantBubble({
           {!message.id.startsWith("draft-") ? (
             <div className="mt-2 flex items-center gap-1">
               <IconAction label="复制" onClick={() => void navigator.clipboard.writeText(message.content)} />
+              {trace !== undefined && onOpenTrace !== undefined ? (
+                <IconAction label="运行详情" onClick={onOpenTrace} />
+              ) : null}
               <IconAction label="重新生成" onClick={onRegenerate} />
               <IconAction
                 label="赞"

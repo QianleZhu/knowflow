@@ -18,6 +18,7 @@ import { useAuth } from "../../../components/auth-provider";
 import { apiRequest } from "../../../lib/api";
 import { EmptyState } from "../../../components/ui/feedback";
 import { MetricCard } from "../../../components/ui/metric-card";
+import { ModelUsagePanel } from "./model-usage-panel";
 import { Table, TableBody, TableCell, TableHead, TableHeaderCell, TableRow } from "../../../components/ui/table";
 import { TabList, type TabItem } from "../../../components/ui/tabs";
 import {
@@ -151,6 +152,7 @@ function AnalyticsContent() {
         </p>
       ) : (
         <div className="space-y-6">
+          <ModelUsagePanel range={range} />
           <div>
             <h2 className="mb-3 text-base font-semibold text-ink">关键指标</h2>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">

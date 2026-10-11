@@ -1,0 +1,1 @@
+CREATE INDEX "agent_runtime_traces_created_idx" ON "agent_runtime_traces" USING btree ("created_at");

@@ -1,9 +1,9 @@
 "use client";
 
-import { useRef, useState, useCallback, type SyntheticEvent } from "react";
+import { useRef, useState, useCallback, useEffect, type SyntheticEvent } from "react";
 import { Archive, RotateCcw } from "lucide-react";
-import type { Conversation } from "@knowflow/shared";
-import { conversationSchema } from "@knowflow/shared";
+import type { AgentTraceSummary, Conversation } from "@knowflow/shared";
+import { agentTraceListResponseSchema, conversationSchema } from "@knowflow/shared";
 
 import { Button } from "../../components/ui/button";
 import { EmptyState, Skeleton } from "../../components/ui/feedback";
@@ -11,6 +11,7 @@ import { AssistantBubble, UserBubble, CorrectionDialog } from "./chat-bubbles";
 import { apiRequest } from "../../lib/api";
 import { cn } from "../../lib/cn";
 import { useAgentChat } from "../_hooks/use-agent-chat";
+import { TraceDetailsSheet } from "./trace-details-sheet";
 
 function formatDate(value: string): string {
   return new Intl.DateTimeFormat("zh-CN", {
@@ -56,6 +57,9 @@ export function AgentChatLayout({
 }: AgentChatLayoutProps) {
   const [processingId, setProcessingId] = useState<string | null>(null);
   const [toast, setToast] = useState<{ message: string; tone: "success" | "danger" } | null>(null);
+  const [traceSummaries, setTraceSummaries] = useState<AgentTraceSummary[]>([]);
+  const [traceLoadError, setTraceLoadError] = useState<string | null>(null);
+  const [openedTraceId, setOpenedTraceId] = useState<string | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   const showToast = useCallback((message: string, tone: "success" | "danger" = "success") => {
@@ -82,6 +86,41 @@ export function AgentChatLayout({
     regenerate,
     setError,
   } = chatHook;
+
+  // 仅在会话静止时加载 Trace 摘要；运行正文由详情抽屉在用户打开后再按 Span 获取。
+  useEffect(() => {
+    const controller = new AbortController();
+    setOpenedTraceId(null);
+    setTraceSummaries([]);
+    setTraceLoadError(null);
+    if (selectedConversationId === "" || isAsking) return () => controller.abort();
+
+    void apiRequest(
+      `/conversations/${selectedConversationId}/traces`,
+      agentTraceListResponseSchema,
+      { cache: "no-store", signal: controller.signal },
+    )
+      .then((response) => setTraceSummaries(response.items))
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted) {
+          setTraceLoadError(error instanceof Error ? error.message : "加载运行记录失败");
+        }
+      });
+    return () => controller.abort();
+  }, [isAsking, selectedConversationId]);
+
+  const traceByAnswerId = new Map(
+    traceSummaries
+      .filter(
+        (trace): trace is AgentTraceSummary & { messageId: string } => trace.messageId !== null,
+      )
+      .map((trace) => [trace.messageId, trace]),
+  );
+  const failedTraceByUserMessageId = new Map(
+    traceSummaries
+      .filter((trace) => trace.messageId === null)
+      .map((trace) => [trace.userMessageId, trace]),
+  );
 
   async function handleArchive(e: React.MouseEvent, id: string) {
     e.stopPropagation();
@@ -262,6 +301,11 @@ export function AgentChatLayout({
                 {error}
               </p>
             ) : null}
+            {traceLoadError !== null ? (
+              <p className="rounded-md bg-warning-bg px-4 py-2 text-xs text-warning" role="status">
+                运行详情暂时无法加载：{traceLoadError}
+              </p>
+            ) : null}
 
             {!isLoading && messages.length === 0 ? (
               <EmptyState
@@ -273,7 +317,15 @@ export function AgentChatLayout({
 
             {messages.map((message) =>
               message.role === "user" ? (
-                <UserBubble key={message.id} content={message.content} />
+                <UserBubble
+                  key={message.id}
+                  content={message.content}
+                  trace={failedTraceByUserMessageId.get(message.id)}
+                  onOpenTrace={() => {
+                    const trace = failedTraceByUserMessageId.get(message.id);
+                    if (trace !== undefined) setOpenedTraceId(trace.traceId);
+                  }}
+                />
               ) : (
                 <AssistantBubble
                   key={message.id}
@@ -285,6 +337,11 @@ export function AgentChatLayout({
                   onCorrection={() => setCorrectionFor(message.id)}
                   onRegenerate={() => regenerate(message)}
                   onAskRecommended={(q) => void ask(q)}
+                  trace={traceByAnswerId.get(message.id)}
+                  onOpenTrace={() => {
+                    const trace = traceByAnswerId.get(message.id);
+                    if (trace !== undefined) setOpenedTraceId(trace.traceId);
+                  }}
                 />
               ),
             )}
@@ -347,6 +404,14 @@ export function AgentChatLayout({
             void sendFeedback(correctionFor, "correction", data);
             setCorrectionFor(null);
           }
+        }}
+      />
+      <TraceDetailsSheet
+        open={openedTraceId !== null}
+        conversationId={selectedConversationId}
+        trace={traceSummaries.find((item) => item.traceId === openedTraceId) ?? null}
+        onOpenChange={(open) => {
+          if (!open) setOpenedTraceId(null);
         }}
       />
     </div>

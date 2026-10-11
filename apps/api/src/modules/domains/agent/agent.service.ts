@@ -10,7 +10,10 @@ import {
 import {
   agentKnowledgeBases,
   agentRuntimeTraces,
+  agentRuntimeTracePayloads,
+  agentRuntimeTraceSpans,
   agents,
+  auditLogs,
   answerFeedback,
   conversationMessages,
   conversations,
@@ -31,6 +34,11 @@ import type {
   ConversationMessage,
   ConversationMessagesResponse,
   CreateConversationRequest,
+  AgentTraceDetailResponse,
+  AgentTraceListResponse,
+  AgentTracePayloadResponse,
+  AgentTraceSpan,
+  AgentTraceSummary,
 } from "@knowflow/shared";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import {
@@ -50,6 +58,13 @@ import {
 
 import { AliyunLlmService, type ChatRequestMessage } from "../../../shared/llm/aliyun-llm.js";
 import { countQwenChatTokens } from "../../../shared/llm/qwen-token-counter.js";
+import {
+  AgentTraceCollector,
+  getAgentTraceScope,
+  recordAgentTracePayload,
+  runWithAgentTraceCollector,
+  withAgentTraceSpan,
+} from "../../../shared/tracing/agent-trace-collector.js";
 import { AnalyticsEventService } from "../analytics/analytics-event.service.js";
 import type { AuthenticatedUser } from "../auth/auth.types.js";
 import { KnowledgeBaseAccessService } from "../knowledge-base/knowledge-base-access.service.js";
@@ -262,6 +277,121 @@ export class AgentService {
     };
   }
 
+  // 返回会话创建者可见的 Trace 摘要，不读取或传输任何原始载荷。
+  async listTraces(
+    conversationId: string,
+    user: AuthenticatedUser,
+  ): Promise<AgentTraceListResponse> {
+    await this.findConversationForUser(conversationId, user);
+    const rows = await db
+      .select()
+      .from(agentRuntimeTraces)
+      .where(
+        and(
+          eq(agentRuntimeTraces.conversationId, conversationId),
+          isNotNull(agentRuntimeTraces.userMessageId),
+        ),
+      )
+      .orderBy(desc(agentRuntimeTraces.createdAt));
+    if (rows.length === 0) return { items: [] };
+
+    const traceIds = rows.map((row) => row.id);
+    const spanCounts = await db
+      .select({ traceId: agentRuntimeTraceSpans.traceId, value: count() })
+      .from(agentRuntimeTraceSpans)
+      .where(inArray(agentRuntimeTraceSpans.traceId, traceIds))
+      .groupBy(agentRuntimeTraceSpans.traceId);
+    const countByTraceId = new Map(spanCounts.map((row) => [row.traceId, row.value]));
+
+    return {
+      items: rows.map((row) =>
+        this.toAgentTraceSummary(row, countByTraceId.get(row.id) ?? 0),
+      ),
+    };
+  }
+
+  // 返回一条 Trace 的 Span 时间线；先验证会话所有权，再写入明细访问审计。
+  async getTraceDetail(
+    conversationId: string,
+    traceId: string,
+    user: AuthenticatedUser,
+  ): Promise<AgentTraceDetailResponse> {
+    await this.findConversationForUser(conversationId, user);
+    const [trace] = await db
+      .select()
+      .from(agentRuntimeTraces)
+      .where(
+        and(
+          eq(agentRuntimeTraces.id, traceId),
+          eq(agentRuntimeTraces.conversationId, conversationId),
+          isNotNull(agentRuntimeTraces.userMessageId),
+        ),
+      )
+      .limit(1);
+    if (trace === undefined) throw new NotFoundException("未找到 Trace");
+
+    const spanRows = await db
+      .select()
+      .from(agentRuntimeTraceSpans)
+      .where(eq(agentRuntimeTraceSpans.traceId, traceId))
+      .orderBy(asc(agentRuntimeTraceSpans.sequence));
+    await this.recordTraceReadAudit(user, traceId, "agent_trace.detail_viewed", {
+      conversationId,
+      spanCount: spanRows.length,
+    });
+
+    return {
+      summary: this.toAgentTraceSummary(trace, spanRows.length),
+      spans: spanRows.map((span) => this.toAgentTraceSpan(span)),
+    };
+  }
+
+  // 返回单个 Span 的原始输入、检索结果或模型响应，并再次校验 Trace/Span 归属。
+  async getTraceSpanPayload(
+    conversationId: string,
+    traceId: string,
+    spanId: string,
+    user: AuthenticatedUser,
+  ): Promise<AgentTracePayloadResponse> {
+    await this.findConversationForUser(conversationId, user);
+    const [trace] = await db
+      .select({ id: agentRuntimeTraces.id })
+      .from(agentRuntimeTraces)
+      .where(
+        and(
+          eq(agentRuntimeTraces.id, traceId),
+          eq(agentRuntimeTraces.conversationId, conversationId),
+          isNotNull(agentRuntimeTraces.userMessageId),
+        ),
+      )
+      .limit(1);
+    if (trace === undefined) throw new NotFoundException("未找到 Trace");
+
+    const [span] = await db
+      .select({ id: agentRuntimeTraceSpans.id })
+      .from(agentRuntimeTraceSpans)
+      .where(
+        and(
+          eq(agentRuntimeTraceSpans.id, spanId),
+          eq(agentRuntimeTraceSpans.traceId, traceId),
+        ),
+      )
+      .limit(1);
+    if (span === undefined) throw new NotFoundException("未找到 Trace Span");
+
+    const payloadRows = await db
+      .select({ type: agentRuntimeTracePayloads.payloadType, payload: agentRuntimeTracePayloads.payload })
+      .from(agentRuntimeTracePayloads)
+      .where(eq(agentRuntimeTracePayloads.spanId, spanId))
+      .orderBy(asc(agentRuntimeTracePayloads.createdAt));
+    await this.recordTraceReadAudit(user, traceId, "agent_trace.payload_viewed", {
+      conversationId,
+      spanId,
+      payloadTypes: payloadRows.map((row) => row.type),
+    });
+    return { spanId, payloads: payloadRows };
+  }
+
   async ask(input: {
     conversationId: string;
     content: string;
@@ -285,63 +415,70 @@ export class AgentService {
     if (userMessage === undefined) {
       throw new BadRequestException("创建用户消息失败");
     }
-    //埋点上报
-    await this.analytics.recordSafe({
-      user: input.user,
-      eventType: "agent_called",
-      targetType: "agent",
-      targetId: agent.id,
-      agentId: agent.id,
-      sessionId: conversation.id,
-      metadata: {
-        conversationId: conversation.id,
-        messageId: userMessage.id,
-      },
-    });
-    //SSE
-    await input.emit({
-      type: "agent.started",
+    const traceCollector = new AgentTraceCollector({ startedAt: new Date(startedAt) });
+    traceCollector.root.addPayload("request", {
       conversationId: conversation.id,
       userMessageId: userMessage.id,
-    });
-    //构建初始状态
-    const initialState: AgentState = {
-      user: input.user,
-      conversation: this.toConversation(conversation),
-      userMessageId: userMessage.id,
+      agentId: agent.id,
       query: input.content,
-      agent: null,
-      knowledgeScope: [],
-      accessibleKnowledgeBases: [],
-      recentMessages: [],
-      conversationSummary: null,
-      queryPlan: null,
-      rewrittenQueries: [],
-      expandedKeywords: [],
-      retrieval: null,
-      promptSnapshot: null,
-      requestMessages: null,
-      contextTokenBudget: null,
-      actualTokenUsage: null,
-      answer: "",
-      citations: [],
-      confidenceLevel: null,
-      noAnswerType: null,
-      assistantMessage: null,
-      steps: [],
-      startedAt: Date.now(),
-      error: null,
-      emit: input.emit,
-    };
-
+    });
     const graph = this.buildGraph();
-    //进图(进入编排层)
-    const result = await graph.invoke({ state: initialState });
-    if (result.state.assistantMessage === null) {
+    const resultState = await runWithAgentTraceCollector(traceCollector, async () => {
+      // 埋点上报保持原有安全失败策略，并与实际 Agent 执行关联在同一个请求上下文。
+      await this.analytics.recordSafe({
+        user: input.user,
+        eventType: "agent_called",
+        targetType: "agent",
+        targetId: agent.id,
+        agentId: agent.id,
+        sessionId: conversation.id,
+        metadata: {
+          conversationId: conversation.id,
+          messageId: userMessage.id,
+        },
+      });
+      await input.emit({
+        type: "agent.started",
+        conversationId: conversation.id,
+        userMessageId: userMessage.id,
+      });
+      const initialState: AgentState = {
+        user: input.user,
+        conversation: this.toConversation(conversation),
+        userMessageId: userMessage.id,
+        query: input.content,
+        agent: null,
+        knowledgeScope: [],
+        accessibleKnowledgeBases: [],
+        recentMessages: [],
+        conversationSummary: null,
+        queryPlan: null,
+        rewrittenQueries: [],
+        expandedKeywords: [],
+        retrieval: null,
+        promptSnapshot: null,
+        requestMessages: null,
+        contextTokenBudget: null,
+        actualTokenUsage: null,
+        answer: "",
+        citations: [],
+        confidenceLevel: null,
+        noAnswerType: null,
+        assistantMessage: null,
+        steps: [],
+        startedAt,
+        error: null,
+        emit: input.emit,
+      };
+      // LangGraph 的全部异步节点共享本次 ask 的隔离 Collector。
+      const result = await graph.invoke({ state: initialState });
+      return result.state;
+    });
+    if (resultState.assistantMessage === null) {
       throw new InternalServerErrorException("Agent 未生成助手消息");
     }
-    await this.recordAskAnalytics(result.state, Date.now() - startedAt);
-    return result.state.assistantMessage;
+    await this.recordAskAnalytics(resultState, Date.now() - startedAt);
+    return resultState.assistantMessage;
   }
 
   async createFeedback(
@@ -496,11 +633,19 @@ export class AgentService {
     await state.emit({ type: "agent.step.started", step });
     const started = { name: step, status: "started" as const, at: new Date().toISOString() };
     try {
-      const next = await handler.call(this, {
+      const stepState = {
         ...state,
-        //当前步骤追加
+        // 当前步骤追加到兼容旧客户端的状态快照。
         steps: [...state.steps, started],
-      });
+      };
+      const next =
+        step === "record_trace"
+          ? await handler.call(this, stepState)
+          : await withAgentTraceSpan({
+              name: step,
+              kind: "agent_step",
+              operation: () => handler.call(this, stepState),
+            });
       await next.emit({ type: "agent.step.completed", step });
       return {
         state: {
@@ -573,6 +718,11 @@ export class AgentService {
     // 回滚开关仅恢复旧查询分析，不改变身份校验或知识库授权边界。
     if (process.env["QUERY_ROUTING_MODE"] === "legacy") {
       // 查询重写暂时停用，旧模式也只保留原始问题。
+      recordAgentTracePayload("routing_decision", {
+        query: state.query,
+        source: "legacy",
+        needsRetrieval: true,
+      });
       return {
         ...state,
         queryPlan: null,
@@ -589,6 +739,12 @@ export class AgentService {
       },
       { mode: process.env["QUERY_ROUTING_MODE"] === "llm_only" ? "llm_only" : "rules" },
     );
+    recordAgentTracePayload("routing_decision", {
+      query: state.query,
+      recentMessages: state.recentMessages,
+      conversationSummary: state.conversationSummary,
+      decision: queryPlan,
+    });
     return {
       ...state,
       queryPlan,
@@ -606,12 +762,21 @@ export class AgentService {
     });
     const originalQuery = state.query.trim();
     const normalizedRewrite = rewrittenQuery?.trim() ?? "";
+    const nextRewrittenQueries =
+      normalizedRewrite.length > 0 && normalizedRewrite !== originalQuery
+        ? [normalizedRewrite]
+        : [];
+    recordAgentTracePayload("query_rewrite", {
+      input: {
+        query: state.query,
+        recentMessages: state.recentMessages,
+        conversationSummary: state.conversationSummary,
+      },
+      output: { rewrittenQueries: nextRewrittenQueries, expandedKeywords },
+    });
     return {
       ...state,
-      rewrittenQueries:
-        normalizedRewrite.length > 0 && normalizedRewrite !== originalQuery
-          ? [normalizedRewrite]
-          : [],
+      rewrittenQueries: nextRewrittenQueries,
       expandedKeywords,
     };
   }
@@ -642,14 +807,19 @@ export class AgentService {
       .orderBy(desc(conversationMessages.createdAt))
       .limit(SHORT_TERM_MAX_MESSAGES);
     const recentMessages = normalizeRecentMessages(recentRows.reverse());
+    const conversationSummary = renderCompressedSummaryForPrompt(
+      conversation?.rollingSummary ?? null,
+      conversation?.summarizedMessageCount ?? 0,
+    );
+    recordAgentTracePayload("conversation_context", {
+      summary: conversationSummary,
+      recentMessages,
+    });
 
     return {
       ...state,
       recentMessages,
-      conversationSummary: renderCompressedSummaryForPrompt(
-        conversation?.rollingSummary ?? null,
-        conversation?.summarizedMessageCount ?? 0,
-      ),
+      conversationSummary,
     };
   }
 
@@ -660,6 +830,11 @@ export class AgentService {
         ? !state.queryPlan.needsRetrieval
         : isKnowledgeScopeQuestion(state.query)
     ) {
+      recordAgentTracePayload("retrieval_skipped", {
+        query: state.query,
+        reason: "routing_decision",
+        queryPlan: state.queryPlan,
+      });
       await state.emit({
         type: "agent.retrieval.completed",
         contextCount: 0,
@@ -667,7 +842,7 @@ export class AgentService {
       return { ...state, retrieval: null };
     }
 
-    const retrieval = await this.retrievalService.retrieve({
+    const retrievalInput = {
       query: state.query,
       rewrittenQueries: state.rewrittenQueries,
       expandedKeywords: state.expandedKeywords,
@@ -676,6 +851,22 @@ export class AgentService {
             state.queryPlan?.requestedKnowledgeBaseIds.includes(id),
           )
         : state.knowledgeScope,
+    };
+    recordAgentTracePayload("retrieval_request", retrievalInput);
+    const retrieval = await this.retrievalService.retrieve(retrievalInput);
+    recordAgentTracePayload("retrieval_result", {
+      query: retrieval.query,
+      rewrittenQueries: retrieval.rewrittenQueries,
+      expandedKeywords: retrieval.expandedKeywords,
+      candidates: retrieval.candidates.map((candidate) => ({
+        id: candidate.id,
+        sourceType: candidate.sourceType,
+        channels: candidate.channels,
+        initialScore: candidate.initialScore,
+        rrfScore: candidate.rrfScore,
+        rrfRank: candidate.rrfRank,
+      })),
+      trace: retrieval.trace,
     });
     return { ...state, retrieval };
   }
@@ -689,7 +880,14 @@ export class AgentService {
 
     if (retrieval.candidates.length === 0) {
       await state.emit({ type: "agent.retrieval.completed", contextCount: 0 });
-      return { ...state, retrieval: this.withRerankedContexts(retrieval, [], false, 0, null) };
+      const updatedRetrieval = this.withRerankedContexts(retrieval, [], false, 0, null);
+      recordAgentTracePayload("rerank_result", {
+        rerankSucceeded: false,
+        candidateCount: 0,
+        contexts: [],
+        trace: updatedRetrieval.trace,
+      });
+      return { ...state, retrieval: updatedRetrieval };
     }
 
     const documents = retrieval.candidates.map((candidate) => this.toRerankDocument(candidate));
@@ -748,6 +946,13 @@ export class AgentService {
       rerankedCandidateCount,
       rerankFailure,
     );
+    recordAgentTracePayload("rerank_result", {
+      rerankSucceeded,
+      rerankFailure,
+      candidateCount: retrieval.candidates.length,
+      contexts: updatedRetrieval.contexts,
+      trace: updatedRetrieval.trace,
+    });
     await state.emit({
       type: "agent.retrieval.completed",
       contextCount: updatedRetrieval.contexts.length,
@@ -993,6 +1198,15 @@ export class AgentService {
       actualInputTokens: null,
       actualOutputTokens: null,
     };
+    recordAgentTracePayload("model_context", {
+      tokenBudget: contextTokenBudget,
+      includedContexts: selectedContexts.map((item) => ({
+        id: item.id,
+        title: item.title,
+        sourceType: item.sourceType,
+        contextCharacterCount: item.contextText.length,
+      })),
+    });
     return {
       ...state,
       promptSnapshot: prompt,
@@ -1169,8 +1383,28 @@ export class AgentService {
     return `当前范围内可查询的文档：\n${titles.join("\n")}${rows.length > 50 ? "\n仅展示前 50 条，请缩小知识库范围查看。" : ""}`;
   }
 
-  // 持久化完整用户/助手正文、来源引用和不含检索正文的运行追踪。
+  // 在同一事务中保存回答消息、Trace 根、全部 Span 和载荷。
   private async recordTrace(state: AgentState): Promise<AgentState> {
+    const traceCollector = getAgentTraceScope()?.collector;
+    if (traceCollector === undefined) {
+      throw new InternalServerErrorException("Trace Collector 未建立");
+    }
+    const persistenceSpan = traceCollector.createSpan({
+      name: "record_trace",
+      kind: "agent_step",
+      parentSpanId: traceCollector.root.record.id,
+    });
+    persistenceSpan.finish();
+    traceCollector.root.addPayload("response", {
+      answer: state.answer,
+      citations: state.citations,
+      confidenceLevel: state.confidenceLevel,
+      noAnswerType: state.noAnswerType,
+    });
+    traceCollector.finishRoot("completed");
+    const usageSummary = traceCollector.getUsageSummary();
+    const traceRows = traceCollector.toDatabaseRows();
+
     const [assistantMessage] = await db.transaction(async (tx) => {
       const [message] = await tx
         .insert(conversationMessages)
@@ -1200,11 +1434,14 @@ export class AgentService {
         .where(eq(conversations.id, state.conversation.id));
 
       await tx.insert(agentRuntimeTraces).values({
+        id: traceCollector.id,
         agentId: state.conversation.agentId,
         conversationId: state.conversation.id,
+        userMessageId: state.userMessageId,
         messageId: message.id,
         userId: state.user.id,
         graphVersion: GRAPH_VERSION,
+        status: "completed",
         stateSnapshot: this.toStateSnapshot(state),
         steps: state.steps,
         retrievedContext: this.toTraceContextMetadata(state.retrieval?.contexts ?? []),
@@ -1214,8 +1451,24 @@ export class AgentService {
         confidenceLevel: state.confidenceLevel,
         noAnswerType: state.noAnswerType,
         latencyMs: Date.now() - state.startedAt,
+        inputTokens: usageSummary.inputTokens,
+        outputTokens: usageSummary.outputTokens,
+        unknownUsageCount: usageSummary.unknownUsageCount,
+        estimatedCostCny: usageSummary.estimatedCostCny,
         error: state.error,
+        createdAt: traceCollector.startedAt,
       });
+      // 多个 Span 与载荷分别批量插入，避免每个埋点产生独立 SQL 往返。
+      await tx.insert(agentRuntimeTraceSpans).values(traceRows.spans);
+      if (traceRows.payloads.length > 0) {
+        await tx.insert(agentRuntimeTracePayloads).values(
+          traceRows.payloads.map((payload) => ({
+            spanId: payload.spanId,
+            payloadType: payload.payloadType,
+            payload: payload.payload,
+          })),
+        );
+      }
 
       return [message];
     });
@@ -1227,32 +1480,166 @@ export class AgentService {
       state.citations,
       state.agent?.recommendedQuestions ?? [],
     );
-    await state.emit({ type: "agent.completed", message: assistant });
+    try {
+      await state.emit({ type: "agent.completed", message: assistant });
+    } catch (error) {
+      // 客户端连接中断不应回滚已完成的回答，也不应把同一 Trace 重复记成失败。
+      this.logger.warn(
+        `Agent answer ${assistant.id} was saved, but the completion event could not be sent: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
     return { ...state, assistantMessage: assistant };
   }
 
-  // 记录失败阶段与检索元数据，不把上下文正文写入运行追踪。
+  // 失败时保留已经发生的步骤、模型请求和检索载荷，仍以批量事务写入。
   private async recordErroredTrace(state: AgentState): Promise<void> {
-    if (state.agent === null) {
+    const traceCollector = getAgentTraceScope()?.collector;
+    if (traceCollector === undefined) {
+      this.logger.error("Agent 运行失败时缺少 Trace Collector");
       return;
     }
-    await db.insert(agentRuntimeTraces).values({
-      agentId: state.agent.id,
-      conversationId: state.conversation.id,
-      messageId: null,
-      userId: state.user.id,
-      graphVersion: GRAPH_VERSION,
-      stateSnapshot: this.toStateSnapshot(state),
-      steps: state.steps,
-      retrievedContext: this.toTraceContextMetadata(state.retrieval?.contexts ?? []),
-      promptSnapshot: null,
-      modelConfig: {},
-      citations: state.citations,
-      confidenceLevel: state.confidenceLevel,
-      noAnswerType: state.noAnswerType,
-      latencyMs: Date.now() - state.startedAt,
-      error: state.error,
+    traceCollector.failSpanByName("record_trace", state.error);
+    traceCollector.root.addPayload("failure", { message: state.error });
+    traceCollector.finishRoot("failed", state.error);
+    const usageSummary = traceCollector.getUsageSummary();
+    const traceRows = traceCollector.toDatabaseRows();
+    await db.transaction(async (tx) => {
+      await tx.insert(agentRuntimeTraces).values({
+        id: traceCollector.id,
+        agentId: state.agent?.id ?? state.conversation.agentId,
+        conversationId: state.conversation.id,
+        userMessageId: state.userMessageId,
+        messageId: null,
+        userId: state.user.id,
+        graphVersion: GRAPH_VERSION,
+        status: "failed",
+        stateSnapshot: this.toStateSnapshot(state),
+        steps: state.steps,
+        retrievedContext: this.toTraceContextMetadata(state.retrieval?.contexts ?? []),
+        promptSnapshot: null,
+        modelConfig: {},
+        citations: state.citations,
+        confidenceLevel: state.confidenceLevel,
+        noAnswerType: state.noAnswerType,
+        latencyMs: Date.now() - state.startedAt,
+        inputTokens: usageSummary.inputTokens,
+        outputTokens: usageSummary.outputTokens,
+        unknownUsageCount: usageSummary.unknownUsageCount,
+        estimatedCostCny: usageSummary.estimatedCostCny,
+        error: state.error,
+        createdAt: traceCollector.startedAt,
+      });
+      await tx.insert(agentRuntimeTraceSpans).values(traceRows.spans);
+      if (traceRows.payloads.length > 0) {
+        await tx.insert(agentRuntimeTracePayloads).values(
+          traceRows.payloads.map((payload) => ({
+            spanId: payload.spanId,
+            payloadType: payload.payloadType,
+            payload: payload.payload,
+          })),
+        );
+      }
     });
+  }
+
+  // 将数据库 Trace 根映射为不含任何会话正文的摘要契约。
+  private toAgentTraceSummary(
+    row: typeof agentRuntimeTraces.$inferSelect,
+    spanCount: number,
+  ): AgentTraceSummary {
+    if (row.conversationId === null || row.userMessageId === null) {
+      throw new InternalServerErrorException("Trace 关联消息不完整");
+    }
+    return {
+      traceId: row.id,
+      conversationId: row.conversationId,
+      userMessageId: row.userMessageId,
+      messageId: row.messageId,
+      status: row.status === "failed" ? "failed" : "completed",
+      createdAt: row.createdAt.toISOString(),
+      latencyMs: row.latencyMs,
+      inputTokens: row.inputTokens,
+      outputTokens: row.outputTokens,
+      unknownUsageCount: row.unknownUsageCount,
+      estimatedCostCny: this.toNullableNumber(row.estimatedCostCny),
+      spanCount,
+    };
+  }
+
+  // 将数据库 Span 映射为前端时间线契约，并过滤无效费率快照。
+  private toAgentTraceSpan(
+    row: typeof agentRuntimeTraceSpans.$inferSelect,
+  ): AgentTraceSpan {
+    return {
+      id: row.id,
+      parentSpanId: row.parentSpanId,
+      sequence: row.sequence,
+      name: row.name,
+      kind: row.kind,
+      status:
+        row.status === "failed" ? "failed" : row.status === "running" ? "running" : "completed",
+      startedAt: row.startedAt.toISOString(),
+      finishedAt: row.finishedAt?.toISOString() ?? null,
+      durationMs: row.durationMs,
+      model: row.model,
+      inputTokens: row.inputTokens,
+      outputTokens: row.outputTokens,
+      usageSource:
+        row.usageSource === "provider" || row.usageSource === "unknown"
+          ? row.usageSource
+          : null,
+      estimatedCostCny: this.toNullableNumber(row.estimatedCostCny),
+      priceSnapshot: this.toAgentTracePriceSnapshot(row.priceSnapshot),
+      error: row.error,
+    };
+  }
+
+  // 只向调用方提供结构完整的标准价快照。
+  private toAgentTracePriceSnapshot(value: unknown): AgentTraceSpan["priceSnapshot"] {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+    const snapshot = value as Record<string, unknown>;
+    if (
+      typeof snapshot["region"] !== "string" ||
+      typeof snapshot["version"] !== "string" ||
+      snapshot["currency"] !== "CNY" ||
+      typeof snapshot["inputCnyPerMillion"] !== "number" ||
+      typeof snapshot["outputCnyPerMillion"] !== "number"
+    ) {
+      return null;
+    }
+    return {
+      region: snapshot["region"],
+      version: snapshot["version"],
+      currency: "CNY",
+      inputCnyPerMillion: snapshot["inputCnyPerMillion"],
+      outputCnyPerMillion: snapshot["outputCnyPerMillion"],
+    };
+  }
+
+  // 在每次明细读取后记录访问审计，不把原始载荷写入审计记录。
+  private async recordTraceReadAudit(
+    user: AuthenticatedUser,
+    traceId: string,
+    action: string,
+    detail: Record<string, unknown>,
+  ): Promise<void> {
+    await db.insert(auditLogs).values({
+      userId: user.id,
+      action,
+      targetType: "agent_runtime_trace",
+      targetId: traceId,
+      result: "success",
+      detail,
+    });
+  }
+
+  // 将 Drizzle numeric 值安全转换为 API 使用的有限数值。
+  private toNullableNumber(value: string | number | null): number | null {
+    if (value === null) return null;
+    const parsed = typeof value === "number" ? value : Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
   }
 
   private async recordAskAnalytics(state: AgentState, durationMs: number): Promise<void> {

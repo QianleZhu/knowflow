@@ -829,6 +829,77 @@ export const conversationMessagesResponseSchema = z.object({
   items: z.array(conversationMessageSchema),
 });
 
+// Agent 单次运行 Trace 的轻量列表、详情和延迟载荷读取契约。
+export const agentTraceStatusSchema = z.enum(["completed", "failed"]);
+export const agentTraceUsageSourceSchema = z.enum(["provider", "unknown"]);
+
+export const agentTraceSummarySchema = z.object({
+  traceId: z.uuid(),
+  conversationId: z.uuid(),
+  userMessageId: z.uuid(),
+  messageId: z.uuid().nullable(),
+  status: agentTraceStatusSchema,
+  createdAt: z.iso.datetime(),
+  latencyMs: z.number().int().nonnegative().nullable(),
+  inputTokens: z.number().int().nonnegative(),
+  outputTokens: z.number().int().nonnegative(),
+  unknownUsageCount: z.number().int().nonnegative(),
+  estimatedCostCny: z.number().nonnegative().nullable(),
+  spanCount: z.number().int().nonnegative(),
+});
+
+export const agentTraceListResponseSchema = z.object({
+  items: z.array(agentTraceSummarySchema),
+});
+
+export const agentTraceRouteParamsSchema = z.object({
+  id: z.uuid(),
+  traceId: z.uuid(),
+  spanId: z.uuid().optional(),
+});
+
+export const agentTracePriceSnapshotSchema = z.object({
+  region: z.string(),
+  version: z.string(),
+  currency: z.literal("CNY"),
+  inputCnyPerMillion: z.number().nonnegative(),
+  outputCnyPerMillion: z.number().nonnegative(),
+});
+
+export const agentTraceSpanSchema = z.object({
+  id: z.uuid(),
+  parentSpanId: z.uuid().nullable(),
+  sequence: z.number().int().nonnegative(),
+  name: z.string(),
+  kind: z.string(),
+  status: z.enum(["running", "completed", "failed"]),
+  startedAt: z.iso.datetime(),
+  finishedAt: z.iso.datetime().nullable(),
+  durationMs: z.number().int().nonnegative().nullable(),
+  model: z.string().nullable(),
+  inputTokens: z.number().int().nonnegative().nullable(),
+  outputTokens: z.number().int().nonnegative().nullable(),
+  usageSource: agentTraceUsageSourceSchema.nullable(),
+  estimatedCostCny: z.number().nonnegative().nullable(),
+  priceSnapshot: agentTracePriceSnapshotSchema.nullable(),
+  error: z.string().nullable(),
+});
+
+export const agentTraceDetailResponseSchema = z.object({
+  summary: agentTraceSummarySchema,
+  spans: z.array(agentTraceSpanSchema),
+});
+
+export const agentTracePayloadResponseSchema = z.object({
+  spanId: z.uuid(),
+  payloads: z.array(
+    z.object({
+      type: z.string(),
+      payload: z.unknown(),
+    }),
+  ),
+});
+
 export const askMessageRequestSchema = z.object({
   content: z.string().trim().min(1).max(8000),
 });
@@ -1023,6 +1094,37 @@ export const analyticsOverviewResponseSchema = z.object({
   topKeywords: z.array(analyticsTopKeywordSchema),
 });
 
+// 管理分析只返回聚合用量，不包含 Trace 正文或标识。
+export const modelUsageAggregateSchema = z.object({
+  model: z.string(),
+  requestCount: z.number().int().nonnegative(),
+  inputTokens: z.number().int().nonnegative(),
+  outputTokens: z.number().int().nonnegative(),
+  unknownUsageCount: z.number().int().nonnegative(),
+  estimatedCostCny: z.number().nonnegative().nullable(),
+});
+
+export const modelUsageDailySchema = z.object({
+  date: z.iso.date(),
+  model: z.string(),
+  inputTokens: z.number().int().nonnegative(),
+  outputTokens: z.number().int().nonnegative(),
+  estimatedCostCny: z.number().nonnegative().nullable(),
+});
+
+export const modelUsageAnalyticsResponseSchema = z.object({
+  range: analyticsRangeQuerySchema,
+  totals: z.object({
+    requestCount: z.number().int().nonnegative(),
+    inputTokens: z.number().int().nonnegative(),
+    outputTokens: z.number().int().nonnegative(),
+    unknownUsageCount: z.number().int().nonnegative(),
+    estimatedCostCny: z.number().nonnegative().nullable(),
+  }),
+  byModel: z.array(modelUsageAggregateSchema),
+  daily: z.array(modelUsageDailySchema),
+});
+
 export type ApiError = z.infer<typeof apiErrorSchema>;
 export type ApiFailure = z.infer<typeof apiFailureSchema>;
 export type HealthResponse = z.infer<typeof healthResponseSchema>;
@@ -1124,6 +1226,11 @@ export type Citation = z.infer<typeof citationSchema>;
 
 export type ConversationMessage = z.infer<typeof conversationMessageSchema>;
 export type ConversationMessagesResponse = z.infer<typeof conversationMessagesResponseSchema>;
+export type AgentTraceSummary = z.infer<typeof agentTraceSummarySchema>;
+export type AgentTraceListResponse = z.infer<typeof agentTraceListResponseSchema>;
+export type AgentTraceSpan = z.infer<typeof agentTraceSpanSchema>;
+export type AgentTraceDetailResponse = z.infer<typeof agentTraceDetailResponseSchema>;
+export type AgentTracePayloadResponse = z.infer<typeof agentTracePayloadResponseSchema>;
 export type AskMessageRequest = z.infer<typeof askMessageRequestSchema>;
 export type AskStreamEvent = z.infer<typeof askStreamEventSchema>;
 export type ConfidenceLevel = z.infer<typeof confidenceLevelSchema>;
@@ -1140,3 +1247,4 @@ export type AnalyticsTopKeyword = z.infer<typeof analyticsTopKeywordSchema>;
 export type AnalyticsEntityTotals = z.infer<typeof analyticsEntityTotalsSchema>;
 export type KnowledgeBaseAnalyticsResponse = z.infer<typeof knowledgeBaseAnalyticsResponseSchema>;
 export type AnalyticsOverviewResponse = z.infer<typeof analyticsOverviewResponseSchema>;
+export type ModelUsageAnalyticsResponse = z.infer<typeof modelUsageAnalyticsResponseSchema>;

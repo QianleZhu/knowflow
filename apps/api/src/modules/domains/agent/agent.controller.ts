@@ -13,6 +13,10 @@ import {
 import {
   agentListQuerySchema,
   agentListResponseSchema,
+  agentTraceDetailResponseSchema,
+  agentTraceListResponseSchema,
+  agentTracePayloadResponseSchema,
+  agentTraceRouteParamsSchema,
   answerFeedbackRequestSchema,
   askMessageRequestSchema,
   conversationListQuerySchema,
@@ -22,6 +26,9 @@ import {
   createConversationRequestSchema,
   uuidParamSchema,
   type AgentListResponse,
+  type AgentTraceDetailResponse,
+  type AgentTraceListResponse,
+  type AgentTracePayloadResponse,
   type Conversation,
   type ConversationListResponse,
   type ConversationMessagesResponse,
@@ -110,6 +117,49 @@ export class AgentController {
     const { id } = uuidParamSchema.parse(params);
     const data = await this.agentService.listMessages(id, this.requireUser(request));
     return { ok: true, data: conversationMessagesResponseSchema.parse(data) };
+  }
+
+  // 会话 Trace 列表只返回状态、时长和用量摘要，不包含原始内容。
+  @Get("conversations/:id/traces")
+  async listTraces(
+    @Param() params: unknown,
+    @Req() request: AuthenticatedRequest,
+  ): Promise<ApiSuccess<AgentTraceListResponse>> {
+    const { id } = uuidParamSchema.parse(params);
+    const data = await this.agentService.listTraces(id, this.requireUser(request));
+    return { ok: true, data: agentTraceListResponseSchema.parse(data) };
+  }
+
+  // 会话创建者可读取 Trace 时间线；Service 会在数据库查询前校验会话归属。
+  @Get("conversations/:id/traces/:traceId")
+  async getTraceDetail(
+    @Param() params: unknown,
+    @Req() request: AuthenticatedRequest,
+  ): Promise<ApiSuccess<AgentTraceDetailResponse>> {
+    const { id, traceId } = agentTraceRouteParamsSchema.parse(params);
+    const data = await this.agentService.getTraceDetail(
+      id,
+      traceId,
+      this.requireUser(request),
+    );
+    return { ok: true, data: agentTraceDetailResponseSchema.parse(data) };
+  }
+
+  // 单独读取一个 Span 的原始载荷，便于大检索结果按需加载且再次授权。
+  @Get("conversations/:id/traces/:traceId/spans/:spanId/payload")
+  async getTraceSpanPayload(
+    @Param() params: unknown,
+    @Req() request: AuthenticatedRequest,
+  ): Promise<ApiSuccess<AgentTracePayloadResponse>> {
+    const { id, traceId, spanId } = agentTraceRouteParamsSchema.parse(params);
+    if (spanId === undefined) throw new InternalServerErrorException("Trace Span 参数缺失");
+    const data = await this.agentService.getTraceSpanPayload(
+      id,
+      traceId,
+      spanId,
+      this.requireUser(request),
+    );
+    return { ok: true, data: agentTracePayloadResponseSchema.parse(data) };
   }
 
   @Post("conversations/:id/messages")

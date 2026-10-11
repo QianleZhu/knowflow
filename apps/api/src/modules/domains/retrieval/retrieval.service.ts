@@ -10,6 +10,10 @@ import {
 import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 
 import { AliyunLlmService } from "../../../shared/llm/aliyun-llm.js";
+import {
+  recordAgentTracePayload,
+  withAgentTraceSpan,
+} from "../../../shared/tracing/agent-trace-collector.js";
 import type {
   RetrievalCandidate,
   RetrievalCandidateMetadata,
@@ -100,6 +104,29 @@ export class RetrievalService {
     const expandedKeywords = this.uniqueNonEmpty(input.expandedKeywords ?? []);
     const vectorQueries = this.uniqueNonEmpty([input.query, ...rewrittenQueries]);
     const ftsQueries = this.uniqueNonEmpty([input.query, ...expandedKeywords]);
+    recordAgentTracePayload("retrieval_queries_and_filters", {
+      originalQuery: input.query,
+      rewrittenQueries,
+      expandedKeywords,
+      vectorQueries,
+      ftsQueries,
+      filters: {
+        allowedKnowledgeBaseIds: input.allowedKnowledgeBaseIds,
+        knowledgeBase: { status: "active", deletedAt: null },
+        document: { enabled: true, processStatus: "completed" },
+        parentChunk: { enabled: true },
+        childChunk: { enabled: true },
+        embedding: { status: "completed", vectorPresent: true },
+        knowledgeItem: { enabled: true, status: "published", vectorPresent: true },
+      },
+      limits: {
+        vectorTopK: VECTOR_TOP_K,
+        ftsTopK: FTS_TOP_K,
+        knowledgeItemTopK: KNOWLEDGE_ITEM_TOP_K,
+        rrfCandidateTopN: RRF_CANDIDATE_TOP_N,
+        rrfK: RRF_K,
+      },
+    });
     if (vectorQueries.length === 0 || input.allowedKnowledgeBaseIds.length === 0) {
       return this.emptyResult(
         input.query,
@@ -111,41 +138,71 @@ export class RetrievalService {
 
     // 向量与知识条目共用查询向量；全文召回独立运行，避免 embedding 故障阻断 FTS。
     const queryEmbeddingsPromise = Promise.resolve().then(() => this.llm.embedTexts(vectorQueries));
+    let vectorRawResults: { query: string; rows: DocumentRecallRow[] }[] = [];
+    let knowledgeItemRawResults: { query: string; rows: KnowledgeItemRecallRow[] }[] = [];
     const [vectorResult, ftsResult, knowledgeItemResult] = await Promise.all([
       this.collectChannelRows(
         "vector",
+        {
+          queries: vectorQueries,
+          allowedKnowledgeBaseIds: input.allowedKnowledgeBaseIds,
+          topK: VECTOR_TOP_K,
+          orderBy: ["cosine_similarity_desc", "child_chunk_id_asc"],
+        },
         async () => {
           const queryEmbeddings = await queryEmbeddingsPromise;
-          const rows = await Promise.all(
-            vectorQueries.map((query, index) =>
-              this.recallVector(query, queryEmbeddings[index] ?? [], input.allowedKnowledgeBaseIds),
-            ),
+          vectorRawResults = await Promise.all(
+            vectorQueries.map(async (query, index) => ({
+              query,
+              rows: await this.recallVector(
+                query,
+                queryEmbeddings[index] ?? [],
+                input.allowedKnowledgeBaseIds,
+              ),
+            })),
           );
-          return rows.flat();
+          return vectorRawResults.flatMap((result) => result.rows);
         },
         (rows) => this.toDocumentCandidates(rows, "vector"),
+        () => vectorRawResults,
       ),
       this.collectChannelRows(
         "fts",
+        {
+          queries: ftsQueries,
+          joinedQuery: ftsQueries.join(" "),
+          allowedKnowledgeBaseIds: input.allowedKnowledgeBaseIds,
+          topK: FTS_TOP_K,
+          queryEscaping: "pgroonga_query_escape",
+          orderBy: ["normalized_pgroonga_score_desc", "child_chunk_id_asc"],
+        },
         () => this.recallFts(ftsQueries, input.allowedKnowledgeBaseIds),
         (rows) => this.toDocumentCandidates(rows, "fts"),
       ),
       this.collectChannelRows(
         "knowledge_item",
+        {
+          queries: vectorQueries,
+          allowedKnowledgeBaseIds: input.allowedKnowledgeBaseIds,
+          topK: KNOWLEDGE_ITEM_TOP_K,
+          orderBy: ["cosine_similarity_desc"],
+        },
         async () => {
           const queryEmbeddings = await queryEmbeddingsPromise;
-          const rows = await Promise.all(
-            vectorQueries.map((query, index) =>
-              this.recallKnowledgeItems(
+          knowledgeItemRawResults = await Promise.all(
+            vectorQueries.map(async (query, index) => ({
+              query,
+              rows: await this.recallKnowledgeItems(
                 query,
                 queryEmbeddings[index] ?? [],
                 input.allowedKnowledgeBaseIds,
               ),
-            ),
+            })),
           );
-          return rows.flat();
+          return knowledgeItemRawResults.flatMap((result) => result.rows);
         },
         (rows) => this.toKnowledgeItemCandidates(rows),
+        () => knowledgeItemRawResults,
       ),
     ]);
     // 汇总各路独立结果和失败记录；成功通道照常参与后续 RRF 融合。
@@ -158,6 +215,13 @@ export class RetrievalService {
       ...knowledgeItemResult.candidates,
     ]);
     const candidates = merged.slice(0, RRF_CANDIDATE_TOP_N);
+    recordAgentTracePayload("rrf_merge", {
+      vectorCandidates: this.toCandidateTraceMetadata(vectorResult.candidates),
+      ftsCandidates: this.toCandidateTraceMetadata(ftsResult.candidates),
+      knowledgeItemCandidates: this.toCandidateTraceMetadata(knowledgeItemResult.candidates),
+      mergedCandidates: this.toCandidateTraceMetadata(merged),
+      returnedCandidates: this.toCandidateTraceMetadata(candidates),
+    });
 
     const result: RetrievalResult = {
       query: input.query,
@@ -195,19 +259,55 @@ export class RetrievalService {
   // 单独收集每个召回通道；失败时记录错误并返回空结果，不影响其他通道。
   private async collectChannelRows<T>(
     channel: RetrievalChannel,
+    request: unknown,
     recall: () => Promise<T[]>,
     rank: (rows: T[]) => RetrievalCandidate[],
+    rawResults: (rows: T[]) => unknown = (rows) => rows,
   ): Promise<ChannelRecallCollection> {
-    try {
-      const rows = await recall();
-      return { recalled: rows.length, candidates: rank(rows), failure: null };
-    } catch (error) {
-      return {
-        recalled: 0,
-        candidates: [],
-        failure: { channel, message: this.errorMessage(error) },
-      };
-    }
+    return withAgentTraceSpan({
+      name: `retrieval.${channel}`,
+      kind: "retrieval",
+      operation: async (span) => {
+        span?.addPayload("request", request);
+        try {
+          const rows = await recall();
+          const candidates = rank(rows);
+          span?.addPayload("raw_candidates", rawResults(rows));
+          span?.addPayload(
+            "ranked_candidates",
+            candidates.map((candidate) => ({
+              id: candidate.id,
+              sourceType: candidate.sourceType,
+              channels: candidate.channels,
+              initialScore: candidate.initialScore,
+              rrfScore: candidate.rrfScore,
+              rrfRank: candidate.rrfRank,
+            })),
+          );
+          return { recalled: rows.length, candidates, failure: null };
+        } catch (error) {
+          span?.addPayload("failure", { message: this.errorMessage(error) });
+          span?.fail(error);
+          return {
+            recalled: 0,
+            candidates: [],
+            failure: { channel, message: this.errorMessage(error) },
+          };
+        }
+      },
+    });
+  }
+
+  // 只记录候选的来源与名次信息，避免和每个检索通道的完整正文重复存储。
+  private toCandidateTraceMetadata(candidates: RetrievalCandidate[]) {
+    return candidates.map((candidate) => ({
+      id: candidate.id,
+      sourceType: candidate.sourceType,
+      channels: candidate.channels,
+      initialScore: candidate.initialScore,
+      rrfScore: candidate.rrfScore,
+      rrfRank: candidate.rrfRank,
+    }));
   }
 
   // 对每个向量查询直接召回子块，父块聚合延迟到重排之后执行。

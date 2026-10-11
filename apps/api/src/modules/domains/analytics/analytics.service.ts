@@ -1,6 +1,8 @@
 import { ForbiddenException, Inject, Injectable, NotFoundException } from "@nestjs/common";
 import {
   analyticsEvents,
+  agentRuntimeTraces,
+  agentRuntimeTraceSpans,
   conversationMessages,
   answerFeedback,
   agents,
@@ -19,10 +21,12 @@ import type {
   AnalyticsTopContent,
   AnalyticsTopKeyword,
   KnowledgeBaseAnalyticsResponse,
+  ModelUsageAnalyticsResponse,
 } from "@knowflow/shared";
 import type { AnyColumn } from "drizzle-orm";
 import {
   and,
+  asc,
   count,
   desc,
   eq,
@@ -216,6 +220,80 @@ export class AnalyticsService {
     };
   }
 
+  // 汇总超级管理员可见的对话模型、嵌入和重排用量，不返回 Trace 内容。
+  async getModelUsageAnalytics(
+    query: AnalyticsRangeQuery,
+    user: AuthenticatedUser,
+  ): Promise<ModelUsageAnalyticsResponse> {
+    if (user.platformRole !== "super_admin") {
+      throw new ForbiddenException("仅超级管理员可查看平台模型用量");
+    }
+
+    const range = this.normalizeRange(query);
+    const conditions = [
+      this.createdAtRangeCondition(agentRuntimeTraces.createdAt, range),
+      inArray(agentRuntimeTraceSpans.kind, ["model", "embedding", "rerank"]),
+    ];
+    const modelLabel = sql<string>`coalesce(${agentRuntimeTraceSpans.model}, '未知模型')`;
+    const unknownUsageCount = sql<number>`count(*) FILTER (WHERE ${agentRuntimeTraceSpans.usageSource} IS DISTINCT FROM 'provider' OR ${agentRuntimeTraceSpans.estimatedCostCny} IS NULL)::int`;
+    const estimatedCost = sql<string | null>`CASE WHEN ${unknownUsageCount} > 0 THEN NULL ELSE coalesce(sum(${agentRuntimeTraceSpans.estimatedCostCny}), 0)::text END`;
+    const aggregateFields = {
+      requestCount: sql<number>`count(*)::int`,
+      inputTokens: sql<number>`coalesce(sum(${agentRuntimeTraceSpans.inputTokens}), 0)::int`,
+      outputTokens: sql<number>`coalesce(sum(${agentRuntimeTraceSpans.outputTokens}), 0)::int`,
+      unknownUsageCount,
+      estimatedCostCny: estimatedCost,
+    };
+
+    const [totalsRows, modelRows, dailyRows] = await Promise.all([
+      db
+        .select(aggregateFields)
+        .from(agentRuntimeTraceSpans)
+        .innerJoin(agentRuntimeTraces, eq(agentRuntimeTraces.id, agentRuntimeTraceSpans.traceId))
+        .where(and(...conditions)),
+      db
+        .select({ model: modelLabel, ...aggregateFields })
+        .from(agentRuntimeTraceSpans)
+        .innerJoin(agentRuntimeTraces, eq(agentRuntimeTraces.id, agentRuntimeTraceSpans.traceId))
+        .where(and(...conditions))
+        .groupBy(modelLabel)
+        .orderBy(desc(sql`sum(coalesce(${agentRuntimeTraceSpans.inputTokens}, 0) + coalesce(${agentRuntimeTraceSpans.outputTokens}, 0))`)),
+      db
+        .select({
+          date: sql<string>`${agentRuntimeTraces.createdAt}::date`,
+          model: modelLabel,
+          inputTokens: sql<number>`coalesce(sum(${agentRuntimeTraceSpans.inputTokens}), 0)::int`,
+          outputTokens: sql<number>`coalesce(sum(${agentRuntimeTraceSpans.outputTokens}), 0)::int`,
+          estimatedCostCny: estimatedCost,
+        })
+        .from(agentRuntimeTraceSpans)
+        .innerJoin(agentRuntimeTraces, eq(agentRuntimeTraces.id, agentRuntimeTraceSpans.traceId))
+        .where(and(...conditions))
+        .groupBy(sql`${agentRuntimeTraces.createdAt}::date`, modelLabel)
+        .orderBy(asc(sql`${agentRuntimeTraces.createdAt}::date`), asc(modelLabel)),
+    ]);
+    const totals = totalsRows[0] ?? {
+      requestCount: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      unknownUsageCount: 0,
+      estimatedCostCny: "0",
+    };
+
+    return {
+      range: this.toRangeResponse(range),
+      totals: { ...totals, estimatedCostCny: this.toNullableNumber(totals.estimatedCostCny) },
+      byModel: modelRows.map((row) => ({
+        ...row,
+        estimatedCostCny: this.toNullableNumber(row.estimatedCostCny),
+      })),
+      daily: dailyRows.map((row) => ({
+        ...row,
+        estimatedCostCny: this.toNullableNumber(row.estimatedCostCny),
+      })),
+    };
+  }
+
   private normalizeRange(query: AnalyticsRangeQuery): NormalizedRange {
     const today = this.toDateOnly(new Date());
     if (query.range === "custom") {
@@ -268,6 +346,13 @@ export class AnalyticsService {
       return value.toISOString();
     }
     return new Date(value).toISOString();
+  }
+
+  // 将数据库 numeric 汇总安全转换为有限浮点数供图表展示。
+  private toNullableNumber(value: string | number | null): number | null {
+    if (value === null) return null;
+    const parsed = typeof value === "number" ? value : Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
   }
 
   private previousRange(range: NormalizedRange): NormalizedRange {

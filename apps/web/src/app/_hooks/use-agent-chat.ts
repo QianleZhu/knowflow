@@ -285,6 +285,16 @@ export function useAgentChat({
       return;
     }
     switch (event.type) {
+      case "agent.started": {
+        // 将临时用户消息替换为服务端消息 ID，以便失败 Trace 也能准确挂回该查询。
+        const localUserMessageId = `local-user-${draftId.slice("draft-".length)}`;
+        setMessages((current) =>
+          current.map((message) =>
+            message.id === localUserMessageId ? { ...message, id: event.userMessageId } : message,
+          ),
+        );
+        break;
+      }
       case "agent.step.started": {
         const stepLabels: Record<string, string> = {
           analyze_query: "理解问题中",

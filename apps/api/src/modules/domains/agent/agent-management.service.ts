@@ -292,33 +292,24 @@ export class AgentManagementService {
               .where(inArray(conversationMessages.conversationId, conversationIds));
       const messageIds = messageRows.map((row) => row.id);
 
+      if (conversationIds.length > 0) {
+        // 删除 Agent 会话时同步清理 Trace 根及其级联 Span/载荷，遵守会话级保留周期。
+        await tx
+          .delete(agentRuntimeTraces)
+          .where(inArray(agentRuntimeTraces.conversationId, conversationIds));
+      }
+
       if (messageIds.length > 0) {
         await tx
           .update(knowledgeImprovementTasks)
           .set({ sourceMessageId: null, updatedAt: new Date() })
           .where(inArray(knowledgeImprovementTasks.sourceMessageId, messageIds));
-        await tx
-          .update(agentRuntimeTraces)
-          .set({ messageId: null })
-          .where(inArray(agentRuntimeTraces.messageId, messageIds));
-      }
-
-      if (conversationIds.length > 0) {
-        await tx
-          .update(agentRuntimeTraces)
-          .set({ conversationId: null })
-          .where(inArray(agentRuntimeTraces.conversationId, conversationIds));
       }
 
       await tx
         .update(analyticsEvents)
         .set({ agentId: null })
         .where(eq(analyticsEvents.agentId, agent.id));
-      await tx
-        .update(agentRuntimeTraces)
-        .set({ agentId: null })
-        .where(eq(agentRuntimeTraces.agentId, agent.id));
-
       if (messageIds.length > 0) {
         await tx.delete(messageCitations).where(inArray(messageCitations.messageId, messageIds));
         await tx.delete(answerFeedback).where(inArray(answerFeedback.messageId, messageIds));

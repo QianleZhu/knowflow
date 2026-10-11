@@ -7,6 +7,7 @@ import {
   type ModelUsageType,
   type ResolvedModelConfig,
 } from "./model-usage-client.js";
+import { startAgentTraceSpan } from "../tracing/agent-trace-collector.js";
 
 export const EXPECTED_EMBEDDING_DIMENSION = 1024;
 
@@ -42,6 +43,12 @@ type Qwen3RerankResponse = {
     index?: number;
     relevance_score?: number;
   }[];
+  usage?: {
+    total_tokens?: number;
+    input_tokens?: number;
+    output_tokens?: number;
+    prompt_tokens?: number;
+  };
 };
 
 export type ChatStreamChunk = {
@@ -110,21 +117,38 @@ export class AliyunLlmClient {
       return [];
     }
 
-    const config = await this.resolveModelConfig("embedding");
-    const response = await this.createOpenAiClient(config).embeddings.create({
-      model: config.model,
-      input: texts,
-    });
-    if (response.data.length !== texts.length) {
-      throw new Error("Embedding response count does not match input count");
-    }
-
-    return response.data.map((item) => {
-      if (item.embedding.length !== EXPECTED_EMBEDDING_DIMENSION) {
-        throw new Error(`Embedding dimension mismatch: ${String(item.embedding.length)}`);
+    const span = startAgentTraceSpan({ name: "model.embedding", kind: "embedding" });
+    try {
+      const config = await this.resolveModelConfig("embedding");
+      span?.setModel(config.model);
+      span?.addPayload("request", { model: config.model, input: texts });
+      const response = await this.createOpenAiClient(config).embeddings.create({
+        model: config.model,
+        input: texts,
+      });
+      span?.addPayload("response", {
+        ...response,
+      });
+      const embeddingInputTokens = readPromptTokenCount(response.usage);
+      if (embeddingInputTokens !== null) {
+        span?.setProviderUsage({ inputTokens: embeddingInputTokens, outputTokens: 0 });
       }
-      return item.embedding;
-    });
+      if (response.data.length !== texts.length) {
+        throw new Error("Embedding response count does not match input count");
+      }
+
+      return response.data.map((item) => {
+        if (item.embedding.length !== EXPECTED_EMBEDDING_DIMENSION) {
+          throw new Error(`Embedding dimension mismatch: ${String(item.embedding.length)}`);
+        }
+        return item.embedding;
+      });
+    } catch (error) {
+      span?.fail(error);
+      throw error;
+    } finally {
+      span?.finish();
+    }
   }
 
   // 调用固定重排模型，并校验供应商返回的候选索引与分数。
@@ -138,76 +162,92 @@ export class AliyunLlmClient {
       return [];
     }
 
-    const config = await this.resolveModelConfig("rerank");
-    const requestUrl = process.env["ALIYUN_RERANK_URL"] ?? buildAliyunRerankUrl(config.baseUrl);
-    const maxAttempts = Math.max(1, config.retryCount + 1);
+    const span = startAgentTraceSpan({ name: "model.rerank", kind: "rerank" });
+    try {
+      const config = await this.resolveModelConfig("rerank");
+      span?.setModel(config.model);
+      const requestBody = {
+        model: config.model,
+        query,
+        documents,
+        top_n: Math.min(topN, documents.length),
+        ...(instruct === undefined ? {} : { instruct }),
+      };
+      span?.addPayload("request", requestBody);
+      const requestUrl = process.env["ALIYUN_RERANK_URL"] ?? buildAliyunRerankUrl(config.baseUrl);
+      const maxAttempts = Math.max(1, config.retryCount + 1);
 
-    // 按供应商配置执行有限重试，并只对限流、服务端错误和网络异常重试。
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      let response: Response;
-      try {
-        response = await fetch(requestUrl, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${config.apiKey}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            model: config.model,
-            query,
-            documents,
-            top_n: Math.min(topN, documents.length),
-            ...(instruct === undefined ? {} : { instruct }),
-          }),
-          signal: AbortSignal.timeout(config.timeoutMs),
-        });
-      } catch {
-        if (attempt === maxAttempts) {
-          throw new Error("Model provider request failed");
-        }
-        continue;
-      }
-
-      if (!response.ok) {
-        if ((response.status === 429 || response.status >= 500) && attempt < maxAttempts) {
+      // 按供应商配置执行有限重试，并只对限流、服务端错误和网络异常重试。
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        let response: Response;
+        try {
+          response = await fetch(requestUrl, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${config.apiKey}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(requestBody),
+            signal: AbortSignal.timeout(config.timeoutMs),
+          });
+        } catch {
+          if (attempt === maxAttempts) {
+            throw new Error("Model provider request failed");
+          }
           continue;
         }
-        throw new Error("Model provider request failed");
-      }
 
-      const body = (await response.json()) as Qwen3RerankResponse;
-      const results = body.results;
-      if (!Array.isArray(results)) {
-        throw new Error("Aliyun rerank response is invalid");
-      }
-      // LLM输出格式校验防重复
-      const seenIndexes = new Set<number>();
-      const normalizedResults = results.map((item) => {
-        const index = item.index;
-        const relevanceScore = item.relevance_score;
-        if (
-          typeof index !== "number" ||
-          !Number.isInteger(index) ||
-          index < 0 ||
-          index >= documents.length ||
-          seenIndexes.has(index) ||
-          typeof relevanceScore !== "number" ||
-          !Number.isFinite(relevanceScore) ||
-          relevanceScore < 0 ||
-          relevanceScore > 1
-        ) {
+        if (!response.ok) {
+          if ((response.status === 429 || response.status >= 500) && attempt < maxAttempts) {
+            continue;
+          }
+          throw new Error("Model provider request failed");
+        }
+
+        const body = (await response.json()) as Qwen3RerankResponse;
+        span?.addPayload("response", body);
+        const rerankTokens = body.usage?.input_tokens ?? body.usage?.prompt_tokens ?? body.usage?.total_tokens;
+        if (rerankTokens !== undefined) {
+          span?.setProviderUsage({ inputTokens: rerankTokens, outputTokens: body.usage?.output_tokens ?? 0 });
+        }
+        const results = body.results;
+        if (!Array.isArray(results)) {
           throw new Error("Aliyun rerank response is invalid");
         }
-        seenIndexes.add(index);
-        return { index, relevanceScore };
-      });
+        // LLM输出格式校验防重复
+        const seenIndexes = new Set<number>();
+        const normalizedResults = results.map((item) => {
+          const index = item.index;
+          const relevanceScore = item.relevance_score;
+          if (
+            typeof index !== "number" ||
+            !Number.isInteger(index) ||
+            index < 0 ||
+            index >= documents.length ||
+            seenIndexes.has(index) ||
+            typeof relevanceScore !== "number" ||
+            !Number.isFinite(relevanceScore) ||
+            relevanceScore < 0 ||
+            relevanceScore > 1
+          ) {
+            throw new Error("Aliyun rerank response is invalid");
+          }
+          seenIndexes.add(index);
+          return { index, relevanceScore };
+        });
 
-      return normalizedResults
-        .sort((left, right) => right.relevanceScore - left.relevanceScore)
-        .slice(0, Math.min(topN, documents.length));
+        return normalizedResults
+          .sort((left, right) => right.relevanceScore - left.relevanceScore)
+          .slice(0, Math.min(topN, documents.length));
+      }
+
+      throw new Error("Model provider request failed");
+    } catch (error) {
+      span?.fail(error);
+      throw error;
+    } finally {
+      span?.finish();
     }
-
-    throw new Error("Model provider request failed");
   }
 
   // 按内部用途流式生成对话内容。
@@ -217,31 +257,59 @@ export class AliyunLlmClient {
     temperature?: number;
     maxOutputTokens?: number;
   }): AsyncIterable<ChatStreamChunk> {
-    const config = await this.resolveModelConfig(input.usageType ?? "chat");
-    const maxTokens = input.maxOutputTokens ?? config.maxOutputTokens;
-    const stream = await this.createOpenAiClient(config).chat.completions.create({
-      model: config.model,
-      messages: input.messages,
-      temperature: input.temperature ?? config.temperature,
-      ...(maxTokens === null ? {} : { max_tokens: maxTokens }),
-      stream: true,
-      stream_options: { include_usage: true },
-    });
+    const span = startAgentTraceSpan({ name: "model.chat.stream", kind: "model" });
+    let responseText = "";
+    let responseUsage: ChatTokenUsage | null = null;
+    let finishReason: string | null = null;
+    try {
+      const config = await this.resolveModelConfig(input.usageType ?? "chat");
+      span?.setModel(config.model);
+      const maxTokens = input.maxOutputTokens ?? config.maxOutputTokens;
+      const requestBody = {
+        model: config.model,
+        messages: input.messages,
+        temperature: input.temperature ?? config.temperature,
+        ...(maxTokens === null ? {} : { max_tokens: maxTokens }),
+        stream: true as const,
+        stream_options: { include_usage: true },
+      };
+      span?.addPayload("request", requestBody);
+      const stream = await this.createOpenAiClient(config).chat.completions.create({
+        ...requestBody,
+      });
 
-    for await (const chunk of stream) {
-      const delta = chunk.choices[0]?.delta.content;
-      const usage =
-        chunk.usage === null || chunk.usage === undefined
-          ? undefined
-          : {
-              inputTokens: chunk.usage.prompt_tokens,
-              outputTokens: chunk.usage.completion_tokens,
-            };
-      if (typeof delta === "string" && delta.length > 0) {
-        yield { delta, ...(usage === undefined ? {} : { usage }) };
-      } else if (usage !== undefined) {
-        yield { delta: "", usage };
+      for await (const chunk of stream) {
+        const delta = chunk.choices[0]?.delta.content;
+        finishReason = chunk.choices[0]?.finish_reason ?? finishReason;
+        const usage =
+          chunk.usage === null || chunk.usage === undefined
+            ? undefined
+            : {
+                inputTokens: chunk.usage.prompt_tokens,
+                outputTokens: chunk.usage.completion_tokens,
+              };
+        if (typeof delta === "string" && delta.length > 0) {
+          responseText += delta;
+          yield { delta, ...(usage === undefined ? {} : { usage }) };
+        } else if (usage !== undefined) {
+          yield { delta: "", usage };
+        }
+        if (usage !== undefined) {
+          responseUsage = usage;
+          span?.setProviderUsage(usage);
+        }
       }
+      span?.addPayload("response", {
+        content: responseText,
+        usage: responseUsage,
+        finishReason,
+      });
+    } catch (error) {
+      span?.addPayload("partial_response", { content: responseText });
+      span?.fail(error);
+      throw error;
+    } finally {
+      span?.finish();
     }
   }
 
@@ -255,16 +323,34 @@ export class AliyunLlmClient {
     temperature?: number;
     maxOutputTokens?: number;
   }): Promise<string> {
-    const config = await this.resolveModelConfig(input.usageType ?? "chat");
-    const maxTokens = input.maxOutputTokens ?? config.maxOutputTokens;
-    const response = await this.createOpenAiClient(config).chat.completions.create({
-      model: config.model,
-      messages: input.messages,
-      temperature: input.temperature ?? config.temperature,
-      ...(maxTokens === null ? {} : { max_tokens: maxTokens }),
-    });
-
-    return response.choices[0]?.message.content ?? "";
+    const span = startAgentTraceSpan({ name: "model.chat.complete", kind: "model" });
+    try {
+      const config = await this.resolveModelConfig(input.usageType ?? "chat");
+      span?.setModel(config.model);
+      const maxTokens = input.maxOutputTokens ?? config.maxOutputTokens;
+      const requestBody = {
+        model: config.model,
+        messages: input.messages,
+        temperature: input.temperature ?? config.temperature,
+        ...(maxTokens === null ? {} : { max_tokens: maxTokens }),
+      };
+      span?.addPayload("request", requestBody);
+      const response = await this.createOpenAiClient(config).chat.completions.create({
+        ...requestBody,
+      });
+      const content = response.choices[0]?.message.content ?? "";
+      span?.addPayload("response", {
+        ...response,
+      });
+      const usage = readChatTokenUsage(response.usage);
+      if (usage !== null) span?.setProviderUsage(usage);
+      return content;
+    } catch (error) {
+      span?.fail(error);
+      throw error;
+    } finally {
+      span?.finish();
+    }
   }
 
   // 返回模型审计信息，不包含 API Key。
@@ -295,6 +381,34 @@ export class AliyunLlmClient {
       maxRetries: config.retryCount,
     });
   }
+}
+
+// 读取聊天模型供应商的实际 Token usage；响应缺少字段时保留未知状态。
+function readChatTokenUsage(value: unknown): ChatTokenUsage | null {
+  if (typeof value !== "object" || value === null) return null;
+  const usage = value as Record<string, unknown>;
+  const inputTokens = usage["prompt_tokens"];
+  const outputTokens = usage["completion_tokens"];
+  if (
+    typeof inputTokens !== "number" ||
+    !Number.isInteger(inputTokens) ||
+    inputTokens < 0 ||
+    typeof outputTokens !== "number" ||
+    !Number.isInteger(outputTokens) ||
+    outputTokens < 0
+  ) {
+    return null;
+  }
+  return { inputTokens, outputTokens };
+}
+
+// 读取嵌入接口的实际输入 Token；供应商缺少 usage 时保留未知，不影响向量结果。
+function readPromptTokenCount(value: unknown): number | null {
+  if (typeof value !== "object" || value === null) return null;
+  const promptTokens = (value as Record<string, unknown>)["prompt_tokens"];
+  return typeof promptTokens === "number" && Number.isInteger(promptTokens) && promptTokens >= 0
+    ? promptTokens
+    : null;
 }
 
 // 统一生成阿里云 Qwen3 Rerank 兼容接口地址，兼容模型配置中的默认 Base URL。
