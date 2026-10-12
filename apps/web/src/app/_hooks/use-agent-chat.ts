@@ -155,6 +155,12 @@ export function useAgentChat({
   );
   const [correctionFor, setCorrectionFor] = useState<string | null>(null);
 
+  // 回调由页面组件传入且常以内联函数创建；用 Ref 保持其最新值，避免重建恢复消息的 effect。
+  const onConversationCreatedRef = useRef(onConversationCreated);
+  const onStreamFinishedRef = useRef(onStreamFinished);
+  onConversationCreatedRef.current = onConversationCreated;
+  onStreamFinishedRef.current = onStreamFinished;
+
   const listEndRef = useRef<HTMLDivElement>(null);
   const prevMessagesLenRef = useRef(0);
   const streamingRef = useRef(false);
@@ -295,7 +301,7 @@ export function useAgentChat({
     });
     selectedConversationIdRef.current = created.id;
     setSelectedConversationIdState(created.id);
-    onConversationCreated?.(created.id);
+    onConversationCreatedRef.current?.(created.id);
     return created.id;
   }
 
@@ -527,7 +533,7 @@ export function useAgentChat({
       if (isAgentRunTerminal(snapshot.status)) {
         if (!finalizedRunIdsRef.current.has(snapshot.id)) {
           finalizedRunIdsRef.current.add(snapshot.id);
-          onStreamFinished?.(snapshot.status);
+          onStreamFinishedRef.current?.(snapshot.status);
         }
         return snapshot.status;
       }
@@ -571,7 +577,7 @@ export function useAgentChat({
               streamingRef.current = false;
               setIsAsking(false);
               setCanResumeRun(false);
-              onStreamFinished?.("failed");
+              onStreamFinishedRef.current?.("failed");
             } else {
               setCanResumeRun(true);
             }
@@ -598,7 +604,7 @@ export function useAgentChat({
               streamingRef.current = false;
               setIsAsking(false);
               setCanResumeRun(false);
-              onStreamFinished?.("failed");
+              onStreamFinishedRef.current?.("failed");
             } else {
               setCanResumeRun(true);
             }
@@ -615,7 +621,7 @@ export function useAgentChat({
         if (isAgentRunTerminal(snapshot.status)) {
           if (!finalizedRunIdsRef.current.has(snapshot.id)) {
             finalizedRunIdsRef.current.add(snapshot.id);
-            onStreamFinished?.(snapshot.status);
+            onStreamFinishedRef.current?.(snapshot.status);
           }
           return snapshot.status;
         }
@@ -631,14 +637,7 @@ export function useAgentChat({
       setError("网络连接中断，已保留部分回答；可以恢复连接或停止生成。");
       return "disconnected";
     },
-    [
-      applyRunSnapshot,
-      fetchRunSnapshot,
-      finishDraftMessage,
-      flushStreamDeltas,
-      onStreamFinished,
-      readRunStream,
-    ],
+    [applyRunSnapshot, fetchRunSnapshot, finishDraftMessage, flushStreamDeltas, readRunStream],
   );
 
   // 用户断线后手动恢复时只打开 run 订阅，不重新发送问题。
@@ -719,6 +718,8 @@ export function useAgentChat({
         );
       } catch (postError) {
         if (controller.signal.aborted) throw postError;
+        // 已收到 4xx 响应时请求被明确拒绝，不查询幂等键，避免把恢复接口的 404 混成发送错误。
+        if (postError instanceof ApiError && postError.status < 500) throw postError;
         // POST 响应可能在服务端创建 run 后丢失；用幂等键 GET 找回，绝不自动重发生成请求。
         try {
           snapshot = await apiRequest(
@@ -769,7 +770,7 @@ export function useAgentChat({
         finishDraftMessage(localDraftId, "failed");
       }
       setError(caught instanceof Error ? caught.message : "提问失败");
-      if (activeRunRef.current === null) onStreamFinished?.("failed");
+      if (activeRunRef.current === null) onStreamFinishedRef.current?.("failed");
     } finally {
       pendingClientRequestIdRef.current = null;
       if (abortControllerRef.current === controller) {
@@ -839,17 +840,29 @@ export function useAgentChat({
     }
     if (streamingRef.current) return;
     try {
-      const [messageResponse, runResponse] = await Promise.all([
-        apiRequest(
-          `/conversations/${conversationId}/messages`,
-          conversationMessagesResponseSchema,
-          {
-            cache: "no-store",
-          },
-        ),
-        apiRequest(`/conversations/${conversationId}/runs`, agentRunListResponseSchema, {
+      const messageResponsePromise = apiRequest(
+        `/conversations/${conversationId}/messages`,
+        conversationMessagesResponseSchema,
+        {
           cache: "no-store",
-        }),
+        },
+      );
+      // 运行列表只用于恢复流式状态；它失败时仍展示普通消息并允许继续提问。
+      const runResponsePromise = apiRequest(
+        `/conversations/${conversationId}/runs`,
+        agentRunListResponseSchema,
+        { cache: "no-store" },
+      ).catch((caught: unknown) => {
+        if (selectedConversationIdRef.current === conversationId) {
+          setError(
+            `运行状态恢复失败：${caught instanceof Error ? caught.message : "服务器异常"}。会话消息仍可使用。`,
+          );
+        }
+        return { items: [] };
+      });
+      const [messageResponse, runResponse] = await Promise.all([
+        messageResponsePromise,
+        runResponsePromise,
       ]);
       if (selectedConversationIdRef.current !== conversationId || readBooleanRef(streamingRef))
         return;

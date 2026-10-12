@@ -3,6 +3,7 @@ import {
   ConflictException,
   ForbiddenException,
   GoneException,
+  Inject,
   Injectable,
   Logger,
   NotFoundException,
@@ -100,12 +101,14 @@ export class AgentRunService implements OnModuleDestroy {
   private readonly redis = new Redis(process.env["REDIS_URL"] ?? "redis://localhost:6379", {
     lazyConnect: true,
     enableReadyCheck: false,
-    enableOfflineQueue: false,
+    // 延迟连接刚启动时允许首次事件命令等待 Redis 就绪，单条命令仍受 5 秒超时限制。
+    enableOfflineQueue: true,
     maxRetriesPerRequest: 1,
     commandTimeout: 5_000,
   });
 
-  constructor(private readonly agentService: AgentService) {
+  // tsx 开发运行时不生成构造函数类型元数据，因此显式声明 AgentService 的注入令牌。
+  constructor(@Inject(AgentService) private readonly agentService: AgentService) {
     // Redis 事件缓存故障时，保留数据库快照并让订阅端自动回到快照恢复。
     this.redis.on("error", (error: Error) => {
       this.logger.warn(`Agent 事件缓存暂不可用：${error.message}`);

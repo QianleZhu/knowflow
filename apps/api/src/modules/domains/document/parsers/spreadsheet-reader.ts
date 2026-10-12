@@ -2,7 +2,7 @@
 import * as XLS from "@e965/xlsx";
 import { parse as parseCsv } from "csv-parse/sync";
 import readXlsxFile from "read-excel-file/node";
-import type { CellValue } from "read-excel-file/node";
+import type { CellValue, Sheet } from "read-excel-file/node";
 
 type SpreadsheetCellValue = CellValue | null;
 
@@ -36,10 +36,22 @@ export async function readSpreadsheet(
   }
 
   if (hasOleCompoundSignature(buffer)) {
-    return readLegacyExcelFile(buffer);
+    return readWithSheetJs(buffer);
   }
 
-  const parsedSheets = await readXlsxFile(buffer);
+  let parsedSheets: Sheet[];
+  try {
+    parsedSheets = await readXlsxFile(buffer);
+  } catch (error) {
+    // 空的 inlineStr 单元格会触发严格解析错误，改用兼容性更强的读取器兜底。
+    if (
+      error instanceof Error &&
+      error.message.startsWith('Unsupported "inline string" cell value structure:')
+    ) {
+      return readWithSheetJs(buffer);
+    }
+    throw error;
+  }
   const sheets = parsedSheets
     .map((sheet) => ({ name: sheet.sheet, ...worksheetRows(sheet.data) }))
     .filter((sheet) => sheet.rows.length > 0);
@@ -81,8 +93,8 @@ function worksheetRows(rows: SpreadsheetCellValue[][]): { rows: string[][]; rowN
   };
 }
 
-// 使用旧版 Excel 读取器解析 OLE 工作簿，并关闭无关格式信息读取。
-function readLegacyExcelFile(buffer: Buffer): SpreadsheetReadResult {
+// 使用兼容性读取器解析 Excel 工作簿，并关闭无关格式信息读取。
+function readWithSheetJs(buffer: Buffer): SpreadsheetReadResult {
   const workbook = XLS.read(buffer, {
     type: "buffer",
     cellDates: true,
