@@ -103,11 +103,12 @@ import type {
   RuntimeAgent,
   SseEmitter,
 } from "./agent.types.js";
+import { JevIntentService } from "./jev-intent.service.js";
 import { QueryRewriteService } from "./query-rewrite.service.js";
 import { QueryUnderstandingService } from "./query-understanding.service.js";
 
 // 记录当前编排图版本，便于追踪时区分节点结构变化。
-const GRAPH_VERSION = "query-router-chat-v5";
+const GRAPH_VERSION = "jev-intent-multilabel-v1";
 // 父块 Max 聚合后，最多将 Top 10 个父块交给上下文构造节点。
 const RERANK_PARENT_CONTEXT_TOP_N = 10;
 // 预算压缩时保护相关度最高的五个文档父块来源。
@@ -161,7 +162,7 @@ export class AgentService {
     private readonly improvementService: KnowledgeImprovementService,
     @Inject(QueryUnderstandingService)
     private readonly queryUnderstanding: QueryUnderstandingService = new QueryUnderstandingService(
-      llm,
+      new JevIntentService(),
     ),
     @Inject(QueryRewriteService)
     private readonly queryRewrite: QueryRewriteService = new QueryRewriteService(llm),
@@ -744,7 +745,7 @@ export class AgentService {
     };
   }
 
-  // 基于已加载的历史和授权库信息，仅识别当前消息是否需要知识库检索。
+  // 基于当前消息和对话历史获取多意图概率，授权范围仍只由后端决定。
   private async analyzeQuery(state: AgentState): Promise<AgentState> {
     // 回滚开关仅恢复旧查询分析，不改变身份校验或知识库授权边界。
     if (process.env["QUERY_ROUTING_MODE"] === "legacy") {
@@ -769,7 +770,6 @@ export class AgentService {
         accessibleKnowledgeBases: state.accessibleKnowledgeBases,
       },
       {
-        mode: process.env["QUERY_ROUTING_MODE"] === "llm_only" ? "llm_only" : "rules",
         ...(state.signal === undefined ? {} : { signal: state.signal }),
       },
     );

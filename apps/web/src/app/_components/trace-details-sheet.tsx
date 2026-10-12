@@ -39,7 +39,7 @@ type TraceDetailsSheetProps = {
 
 // 将人民币估算成本格式化为易读金额或未知状态。
 function formatCost(value: number | null): string {
-  return value === null ? "含未知用量" : `¥${value.toFixed(6)}`;
+  return value === null ? "含未估算调用" : `¥${value.toFixed(6)}`;
 }
 
 // 将毫秒耗时转换为短时间标签。
@@ -69,6 +69,7 @@ function getSpanLabel(name: string): string {
     resolve_knowledge_scope: "解析知识范围",
     parse_conversation_attachments: "加载会话上下文",
     analyze_query: "分析问题与路由",
+    "model.jev.intent": "Jev 多意图分类",
     rewrite_query: "查询改写",
     retrieve_knowledge: "知识检索",
     "retrieval.vector": "向量召回",
@@ -233,7 +234,7 @@ export function TraceDetailsSheet({
                 <span>Trace ID：{trace.traceId}</span>
                 {trace.unknownUsageCount > 0 ? (
                   <span className="text-warning">
-                    {trace.unknownUsageCount} 次模型调用未返回完整 Token 用量
+                    {trace.unknownUsageCount} 次模型调用的用量或标准价估算不完整
                   </span>
                 ) : null}
               </div>
@@ -298,6 +299,8 @@ export function TraceDetailsSheet({
                                     <span>估算 {formatCost(span.estimatedCostCny)}</span>
                                   ) : span.usageSource === "unknown" ? (
                                     <span>Token 用量未知</span>
+                                  ) : span.usageSource === "provider" ? (
+                                    <span>成本未纳入标准价估算</span>
                                   ) : null}
                                   {span.priceSnapshot !== null ? (
                                     <span>

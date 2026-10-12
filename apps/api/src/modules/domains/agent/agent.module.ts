@@ -8,6 +8,7 @@ import { AgentManagementService } from "./agent-management.service.js";
 import { AgentController } from "./agent.controller.js";
 import { AgentService } from "./agent.service.js";
 import { AgentRunService } from "./agent-run.service.js";
+import { JevIntentService } from "./jev-intent.service.js";
 import { QueryUnderstandingService } from "./query-understanding.service.js";
 import { QueryRewriteService } from "./query-rewrite.service.js";
 
@@ -16,6 +17,7 @@ import { QueryRewriteService } from "./query-rewrite.service.js";
   controllers: [AgentController, AgentManagementController],
   providers: [
     AliyunLlmService,
+    JevIntentService,
     QueryUnderstandingService,
     QueryRewriteService,
     AgentService,

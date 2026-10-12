@@ -10,6 +10,7 @@ import type { AuthenticatedUser } from "../auth/auth.types.js";
 import type { KnowledgeImprovementService } from "../knowledge-base/knowledge-improvement.service.js";
 import { AgentService } from "./agent.service.js";
 import type { AgentState } from "./agent.types.js";
+import type { QueryIntent } from "./jev-intent.service.js";
 import type { QueryPlan } from "./query-understanding.service.js";
 
 type AgentServiceInternals = {
@@ -655,7 +656,7 @@ void describe("AgentService query routing integration", () => {
     assert.ok(result.state.answer.includes("知识库"));
   });
 
-  void it("passes standalone query to retrieval and intersects requested scope", async () => {
+  void it("passes the original query to retrieval and intersects requested scope", async () => {
     const service = makeService();
     const calls: { query: string; allowedKnowledgeBaseIds: string[] }[] = [];
     Object.assign(service, {
@@ -668,13 +669,14 @@ void describe("AgentService query routing integration", () => {
     });
     const state: AgentState = {
       ...makeGenerationState(),
+      query: "出差报销需要哪些材料？",
       knowledgeScope: ["hr", "rd"],
       queryPlan: { ...makeQueryPlan("retrieve"), requestedKnowledgeBaseIds: ["hr", "secret"] },
     };
     await (
       service as unknown as { retrieveKnowledge: (state: AgentState) => Promise<AgentState> }
     ).retrieveKnowledge(state);
-    assert.equal(calls[0]?.query, "出差报销需要哪些材料？");
+    assert.equal(calls[0]?.query, state.query);
     assert.deepEqual(calls[0].allowedKnowledgeBaseIds, ["hr"]);
   });
 
@@ -696,8 +698,28 @@ void describe("AgentService query routing integration", () => {
 
 // 构造经过查询理解的计划，便于检查调用链与权限交集。
 function makeQueryPlan(route: QueryPlan["route"]): QueryPlan {
+  const intentByRoute: Record<QueryPlan["route"], QueryIntent> = {
+    social: "general_generation",
+    capability: "assistant_capability",
+    scope: "access_scope",
+    catalog: "document_catalog",
+    redirect: "general_generation",
+    retrieve: "knowledge_qa",
+    direct: "conversation_transform",
+  };
   return {
     route,
+    intents: [intentByRoute[route]],
+    intentScores: {
+      knowledge_qa: null,
+      document_catalog: null,
+      access_scope: null,
+      assistant_capability: null,
+      conversation_transform: null,
+      general_generation: null,
+      unclear: null,
+    },
+    isMixed: false,
     needsRetrieval: route === "retrieve",
     answer: route === "direct" ? "已总结的内容" : null,
     standaloneQuery: "出差报销需要哪些材料？",
@@ -705,11 +727,13 @@ function makeQueryPlan(route: QueryPlan["route"]): QueryPlan {
     requestedKnowledgeBaseIds: [],
     trace: {
       version: "test",
-      mode: "rules",
-      source: "llm",
+      mode: "jev",
+      source: "jev",
       ruleId: null,
       reason: "test",
-      llmCalls: 1,
+      classificationAttempts: 1,
+      model: "typesafe/jev-1.13-test",
+      threshold: 0.5,
       latencyMs: 0,
     },
   };

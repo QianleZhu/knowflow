@@ -1,5 +1,5 @@
-// 意图识别先匹配完整的元问题和纯闲聊，未命中直接交给 LLM；不使用向量打分。
-export const QUERY_ROUTER_VERSION = "rules-retrieval-decision-v5";
+// 意图分类由 Jev 多标签概率完成；整句规则仅保留兼容路由与授权目录映射。
+export const QUERY_ROUTER_VERSION = "jev-multilabel-v1";
 export const QUERY_ROUTES = [
   "social",
   "capability",

@@ -1,37 +1,52 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { AliyunLlmService } from "../../../shared/llm/aliyun-llm.js";
+import {
+  JevIntentService,
+  QUERY_INTENTS,
+  type JevIntentClassification,
+  type JevIntentRequest,
+  type QueryIntentProbabilities,
+} from "./jev-intent.service.js";
 import {
   QueryUnderstandingService,
   matchIntentRule,
   type QueryUnderstandingInput,
 } from "./query-understanding.service.js";
+import {
+  AgentTraceCollector,
+  runWithAgentTraceCollector,
+} from "../../../shared/tracing/agent-trace-collector.js";
 
-// 替身只验证规则、授权边界及故障处理；真实模型结果独立评测。
-class RoutingLlmStub extends AliyunLlmService {
-  llmCalls = 0;
-  response = JSON.stringify({
-    needsRetrieval: true,
-    standaloneQuery: "出差报销需要哪些材料？",
-    keywords: ["出差", "报销", "材料"],
-    requestedKnowledgeBaseIds: [],
-  });
-  messages: Parameters<AliyunLlmService["completeChat"]>[0]["messages"] = [];
+// 为指定意图生成全量概率，未覆盖项保持低置信度。
+function probabilities(
+  overrides: Partial<QueryIntentProbabilities> = {},
+): QueryIntentProbabilities {
+  return Object.fromEntries(
+    QUERY_INTENTS.map((intent) => [intent, overrides[intent] ?? 0.05]),
+  ) as QueryIntentProbabilities;
+}
 
-  // 意图识别禁止调用 embedding；误接入会立即让测试失败。
-  override embedTexts(): Promise<number[][]> {
-    return Promise.reject(new Error("Intent recognition must not call embeddings"));
-  }
+// 构造 Jev 结构化响应替身，避免查询理解测试访问 OpenRouter。
+class JevIntentStub extends JevIntentService {
+  calls = 0;
+  request: JevIntentRequest | null = null;
+  result: JevIntentClassification = {
+    model: "typesafe/jev-1.13-test",
+    probabilities: probabilities({ knowledge_qa: 0.94 }),
+    usage: { input_tokens: 80, output_tokens: 24 },
+  };
+  failure: Error | null = null;
 
-  // 捕获模型输入，验证规则未命中后只调用一次 LLM 并提供历史。
-  override completeChat(input: Parameters<AliyunLlmService["completeChat"]>[0]): Promise<string> {
-    this.llmCalls += 1;
-    this.messages = input.messages;
-    return Promise.resolve(this.response);
+  // 捕获传给分类器的消息并返回可控概率。
+  override classify(input: JevIntentRequest): Promise<JevIntentClassification> {
+    this.calls += 1;
+    this.request = input;
+    if (this.failure !== null) return Promise.reject(this.failure);
+    return Promise.resolve(this.result);
   }
 }
 
-// 构造授权范围与业务历史，检查混合意图和显式选库。
+// 构造有最近会话上下文和授权知识库的分类输入。
 function input(query = "那需要什么材料？"): QueryUnderstandingInput {
   return {
     query,
@@ -44,199 +59,192 @@ function input(query = "那需要什么材料？"): QueryUnderstandingInput {
   };
 }
 
-void describe("rule-first query understanding", () => {
-  void it("directly handles pure greetings, thanks and metadata without a model", async () => {
-    const llm = new RoutingLlmStub();
-    const service = new QueryUnderstandingService(llm);
-    for (const [text, route] of [
-      ["你好！", "social"],
-      ["晚上好，朋友", "social"],
-      ["谢谢，问题搞定啦", "social"],
-      ["你能做什么？", "capability"],
-      ["我可以访问哪些知识库？", "scope"],
-      ["哪些知识库已经向我的账号开放了？", "scope"],
-      ["列出文档目录", "catalog"],
-      ["陪我聊聊天", "redirect"],
-    ]) {
-      const plan = await service.understand(input(text));
-      assert.equal(plan.route, route, text);
-      assert.equal(plan.trace.source, "rule");
-      assert.ok(plan.trace.ruleId);
+void describe("Jev intent classification", () => {
+  void it("calls the TypeSafe SDK through OpenRouter's System One endpoint", async () => {
+    const originalApiKey = process.env["OPENROUTER_API_KEY"];
+    const originalModel = process.env["JEV_INTENT_MODEL"];
+    const originalFetch = globalThis.fetch;
+    const expectedProbabilities = probabilities({ knowledge_qa: 0.96, document_catalog: 0.68 });
+    const capturedRequestBody: { value: string | null } = { value: null };
+
+    process.env["OPENROUTER_API_KEY"] = "test-openrouter-key";
+    process.env["JEV_INTENT_MODEL"] = "jev-1.13";
+    globalThis.fetch = (url, init) => {
+      const requestUrl = url instanceof Request ? url.url : url instanceof URL ? url.href : url;
+      assert.equal(requestUrl, "https://openrouter.ai/api/v1/systemone");
+      assert.equal(new Headers(init?.headers).get("authorization"), "Bearer test-openrouter-key");
+      if (typeof init?.body !== "string") throw new Error("System One request body is missing");
+      capturedRequestBody.value = init.body;
+      const answers = Object.fromEntries(
+        QUERY_INTENTS.map((intent) => [
+          intent,
+          { type: "noul", noul: expectedProbabilities[intent] },
+        ]),
+      );
+      return Promise.resolve(
+        Response.json({
+          model: "typesafe/jev-1.13-test",
+          answers,
+          usage: { input_tokens: 80, output_tokens: 24, cost: 0.00003 },
+        }),
+      );
+    };
+
+    try {
+      const collector = new AgentTraceCollector();
+      const result = await runWithAgentTraceCollector(collector, () =>
+        new JevIntentService().classify(input()),
+      );
+      assert.ok(capturedRequestBody.value);
+      const requestBody = JSON.parse(capturedRequestBody.value) as Record<string, unknown>;
+      assert.deepEqual(result.probabilities, expectedProbabilities);
+      assert.equal(result.model, "typesafe/jev-1.13-test");
+      assert.deepEqual(result.usage, { input_tokens: 80, output_tokens: 24 });
+      assert.equal(requestBody["model"], "jev-1.13");
+      assert.ok(requestBody["questions"]);
+      assert.equal(JSON.stringify(requestBody).includes("accessibleKnowledgeBases"), false);
+      const traceRows = collector.toDatabaseRows();
+      const jevSpan = traceRows.spans.find((span) => span.name === "model.jev.intent");
+      assert.ok(jevSpan);
+      assert.equal(jevSpan.parentSpanId, collector.root.record.id);
+      assert.equal(jevSpan.inputTokens, 80);
+      const responsePayload = traceRows.payloads.find(
+        (payload) => payload.spanId === jevSpan.id && payload.payloadType === "response",
+      );
+      assert.equal(
+        (responsePayload?.payload as { usage?: { openRouterCost?: number } }).usage?.openRouterCost,
+        0.00003,
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+      if (originalApiKey === undefined) delete process.env["OPENROUTER_API_KEY"];
+      else process.env["OPENROUTER_API_KEY"] = originalApiKey;
+      if (originalModel === undefined) delete process.env["JEV_INTENT_MODEL"];
+      else process.env["JEV_INTENT_MODEL"] = originalModel;
     }
-    assert.equal(llm.llmCalls, 0);
   });
 
-  void it("never consumes business text following a greeting or metadata question", async () => {
-    const llm = new RoutingLlmStub();
-    const service = new QueryUnderstandingService(llm);
-    for (const text of [
-      "你好，那需要什么材料？",
-      "谢谢，另外我想了解离职交接的规定",
-      "我可以访问哪些知识库？另外报销需要什么材料？",
-      "列出文档目录并解释报销流程",
-      "给我讲个笑话，然后告诉我采购审批流程",
-    ]) {
-      assert.equal(matchIntentRule(input(text)), null);
-      const plan = await service.understand(input(text));
-      assert.equal(plan.trace.source, "llm");
-      assert.equal(plan.trace.reason, "no_rule_match");
-    }
-    assert.equal(llm.llmCalls, 5);
-    assert.ok(llm.messages.at(-1)?.content.includes("出差回来怎么报销"));
-  });
+  void it("returns multiple independent intents and preserves every probability", async () => {
+    const jev = new JevIntentStub();
+    jev.result.probabilities = probabilities({
+      knowledge_qa: 0.96,
+      document_catalog: 0.82,
+      general_generation: 0.04,
+    });
+    const plan = await new QueryUnderstandingService(jev).understand(
+      input("列出文档目录，并说明报销需要哪些材料"),
+    );
 
-  void it("lets unmatched expressions and contextual follow-ups go directly to the LLM", async () => {
-    const llm = new RoutingLlmStub();
-    const plan = await new QueryUnderstandingService(llm).understand(input());
-    assert.equal(plan.route, "retrieve");
+    assert.deepEqual(plan.intents, ["knowledge_qa", "document_catalog"]);
+    assert.equal(plan.isMixed, true);
     assert.equal(plan.needsRetrieval, true);
-    assert.equal(plan.answer, null);
-    assert.equal(plan.standaloneQuery, "出差报销需要哪些材料？");
-    assert.equal(llm.llmCalls, 1);
-    assert.equal(plan.trace.ruleId, null);
+    assert.equal(plan.route, "retrieve");
+    assert.equal(plan.intentScores.document_catalog, 0.82);
+    assert.equal(plan.trace.source, "jev");
+    assert.equal(plan.trace.model, "typesafe/jev-1.13-test");
+    assert.equal(jev.calls, 1);
   });
 
-  void it("maps named catalog rules only to an unambiguous authorized library", async () => {
-    const llm = new RoutingLlmStub();
-    const service = new QueryUnderstandingService(llm);
-    const plan = await service.understand(input("请列出人事知识库的文档名称，不需要正文"));
+  void it("keeps a single catalog route and resolves only one named authorized library", async () => {
+    const jev = new JevIntentStub();
+    jev.result.probabilities = probabilities({ document_catalog: 0.93 });
+    const plan = await new QueryUnderstandingService(jev).understand(
+      input("请列出人事知识库的文档名称"),
+    );
+
     assert.equal(plan.route, "catalog");
     assert.deepEqual(plan.requestedKnowledgeBaseIds, ["hr"]);
-    assert.equal(plan.trace.ruleId, "catalog-named");
-    assert.equal(llm.llmCalls, 0);
-    assert.equal(matchIntentRule(input("列出秘密知识库的文档目录")), null);
-    assert.equal(
-      matchIntentRule({
-        ...input("列出人事知识库的文档目录"),
-        accessibleKnowledgeBases: [
-          ...input().accessibleKnowledgeBases,
-          { id: "other", name: "人事知识库", description: null },
-        ],
-      }),
-      null,
-    );
+    assert.deepEqual(plan.intents, ["document_catalog"]);
+    assert.equal(plan.isMixed, false);
+    assert.equal(jev.calls, 1);
   });
 
-  void it("rejects model-selected unauthorized IDs instead of falling back to all libraries", async () => {
-    const llm = new RoutingLlmStub();
-    llm.response = JSON.stringify({
-      needsRetrieval: true,
-      standaloneQuery: "工资标准",
-      keywords: [],
-      requestedKnowledgeBaseIds: ["secret"],
-    });
-    const plan = await new QueryUnderstandingService(llm).understand(input());
-    assert.equal(plan.route, "direct");
-    assert.equal(plan.needsRetrieval, false);
-    assert.deepEqual(plan.requestedKnowledgeBaseIds, []);
+  void it("maps access scope and capability labels to existing single-route paths", async () => {
+    const jev = new JevIntentStub();
+    const service = new QueryUnderstandingService(jev);
+    for (const [intent, route, query] of [
+      ["access_scope", "scope", "我可以访问哪些知识库？"],
+      ["assistant_capability", "capability", "你能做什么？"],
+      ["general_generation", "social", "你好"],
+      ["conversation_transform", "direct", "总结上一条回答"],
+    ] as const) {
+      jev.result.probabilities = probabilities({ [intent]: 0.9 });
+      const plan = await service.understand(input(query));
+      assert.equal(plan.route, route, query);
+      assert.deepEqual(plan.intents, [intent]);
+      assert.equal(plan.needsRetrieval, false);
+    }
+    assert.equal(jev.calls, 4);
   });
 
-  void it("does not allow the LLM to infer a library from the business topic", async () => {
-    const llm = new RoutingLlmStub();
-    llm.response = JSON.stringify({
-      needsRetrieval: true,
-      standaloneQuery: "报销材料",
-      keywords: [],
-      requestedKnowledgeBaseIds: ["hr"],
-    });
-    const plan = await new QueryUnderstandingService(llm).understand(input("报销需要哪些材料"));
-    assert.deepEqual(plan.requestedKnowledgeBaseIds, []);
+  void it("retrieves when the request is unclear or Jev is unavailable", async () => {
+    const unclearJev = new JevIntentStub();
+    unclearJev.result.probabilities = probabilities({ unclear: 0.9 });
+    const unclearPlan = await new QueryUnderstandingService(unclearJev).understand(input("那呢？"));
+    assert.deepEqual(unclearPlan.intents, ["unclear"]);
+    assert.equal(unclearPlan.needsRetrieval, true);
+
+    const unavailableJev = new JevIntentStub();
+    unavailableJev.failure = new Error("connection unavailable");
+    const degradedPlan = await new QueryUnderstandingService(unavailableJev).understand(input());
+    assert.equal(degradedPlan.trace.source, "degraded");
+    assert.equal(degradedPlan.trace.model, null);
+    assert.equal(degradedPlan.needsRetrieval, true);
+    assert.ok(Object.values(degradedPlan.intentScores).every((score) => score === null));
   });
 
-  void it("sends transform requests to the fixed direct reply without retrieval", async () => {
-    const llm = new RoutingLlmStub();
-    llm.response = JSON.stringify({
-      needsRetrieval: false,
-      standaloneQuery: "整理成表格",
-      keywords: [],
-      requestedKnowledgeBaseIds: [],
-    });
-    const plan = await new QueryUnderstandingService(llm).understand({
-      ...input("整理成表格"),
-      recentMessages: [],
-    });
-    assert.equal(plan.route, "direct");
-    assert.equal(plan.needsRetrieval, false);
-  });
+  void it("applies the configured threshold without losing raw scores", async () => {
+    const originalThreshold = process.env["JEV_INTENT_THRESHOLD"];
+    process.env["JEV_INTENT_THRESHOLD"] = "0.7";
+    const jev = new JevIntentStub();
+    jev.result.probabilities = probabilities({ access_scope: 0.71, document_catalog: 0.69 });
 
-  void it("preserves original queries on model failure and clarifies ambiguous follow-ups", async () => {
-    const llm = new RoutingLlmStub();
-    llm.response = "invalid JSON";
-    const service = new QueryUnderstandingService(llm);
-    const plan = await service.understand(input("报销需要哪些材料"));
-    assert.equal(plan.trace.source, "degraded");
-    assert.equal(plan.standaloneQuery, "报销需要哪些材料");
-    assert.equal(plan.route, "retrieve");
-    const ambiguous = await service.understand(input("这种申请需要谁审批？"));
-    assert.equal(ambiguous.route, "direct");
-    assert.ok(ambiguous.answer);
-  });
-
-  void it("can bypass rules for diagnostics without invoking embeddings", async () => {
-    const llm = new RoutingLlmStub();
-    const plan = await new QueryUnderstandingService(llm).understand(input("你好"), {
-      mode: "llm_only",
-    });
-    assert.equal(plan.trace.source, "llm");
-    assert.equal(llm.llmCalls, 1);
-  });
-  void it("routes summary requests to the fixed direct reply without generating text", async () => {
-    const llm = new RoutingLlmStub();
-    llm.response = JSON.stringify({
-      needsRetrieval: false,
-      standaloneQuery: "总结上一条回答",
-      keywords: [],
-      requestedKnowledgeBaseIds: [],
-    });
-    const plan = await new QueryUnderstandingService(llm).understand(input("总结上一条回答"));
-    assert.equal(plan.route, "direct");
-    assert.equal(plan.needsRetrieval, false);
-    assert.equal(plan.answer, null);
-    assert.equal(llm.llmCalls, 1);
-    assert.equal(plan.trace.llmNeedsRetrieval, false);
-  });
-
-  void it("rejects inconsistent decisions and the old multi-category contract", async () => {
-    const llm = new RoutingLlmStub();
-    const service = new QueryUnderstandingService(llm);
-    for (const response of [
-      {
-        needsRetrieval: false,
-        answer: null,
-        standaloneQuery: "报销材料",
-        keywords: [],
-        requestedKnowledgeBaseIds: [],
-      },
-      {
-        needsRetrieval: true,
-        answer: "凭记忆回答",
-        standaloneQuery: "报销材料",
-        keywords: [],
-        requestedKnowledgeBaseIds: [],
-      },
-      {
-        route: "social",
-        standaloneQuery: "报销材料",
-        keywords: [],
-        requestedKnowledgeBaseIds: [],
-        clarification: null,
-      },
-    ]) {
-      llm.response = JSON.stringify(response);
-      const plan = await service.understand(input("报销需要哪些材料"));
-      assert.equal(plan.trace.source, "degraded");
-      assert.equal(plan.needsRetrieval, true);
-      assert.equal(plan.answer, null);
+    try {
+      const plan = await new QueryUnderstandingService(jev).understand(input("看看目录和权限"));
+      assert.deepEqual(plan.intents, ["access_scope"]);
+      assert.equal(plan.intentScores.document_catalog, 0.69);
+      assert.equal(plan.trace.threshold, 0.7);
+    } finally {
+      if (originalThreshold === undefined) delete process.env["JEV_INTENT_THRESHOLD"];
+      else process.env["JEV_INTENT_THRESHOLD"] = originalThreshold;
     }
   });
 
-  void it("passes the full recent answer beyond the old 1200-character cutoff", async () => {
-    const llm = new RoutingLlmStub();
-    const content = "正文".repeat(800) + "最后必须保留的要点";
-    await new QueryUnderstandingService(llm).understand({
-      ...input("总结上面的内容"),
-      recentMessages: [{ role: "assistant", content }],
-    });
-    assert.ok(llm.messages.at(-1)?.content.includes("最后必须保留的要点"));
+  void it("does not let mixed greetings bypass Jev classification", async () => {
+    const jev = new JevIntentStub();
+    jev.result.probabilities = probabilities({ knowledge_qa: 0.9, general_generation: 0.78 });
+    const query = "你好，报销流程是什么？";
+    assert.equal(matchIntentRule(input(query)), null);
+    const plan = await new QueryUnderstandingService(jev).understand(input(query));
+    assert.deepEqual(plan.intents, ["knowledge_qa", "general_generation"]);
+    assert.equal(plan.needsRetrieval, true);
+    assert.equal(jev.calls, 1);
+  });
+
+  void it("does not allow classification to select an unauthorized knowledge base", async () => {
+    const jev = new JevIntentStub();
+    jev.result.probabilities = probabilities({ document_catalog: 0.91 });
+    const query = "请列出秘密知识库的文档目录";
+    const plan = await new QueryUnderstandingService(jev).understand(input(query));
+    assert.equal(plan.route, "catalog");
+    assert.deepEqual(plan.requestedKnowledgeBaseIds, []);
+    assert.equal(jev.calls, 1);
+    assert.equal(matchIntentRule(input(query)), null);
+  });
+
+  void it("rejects an invalid probability threshold instead of silently changing policy", async () => {
+    const originalThreshold = process.env["JEV_INTENT_THRESHOLD"];
+    process.env["JEV_INTENT_THRESHOLD"] = "1.2";
+    const jev = new JevIntentStub();
+    try {
+      await assert.rejects(
+        new QueryUnderstandingService(jev).understand(input()),
+        /JEV_INTENT_THRESHOLD/,
+      );
+      assert.equal(jev.calls, 0);
+    } finally {
+      if (originalThreshold === undefined) delete process.env["JEV_INTENT_THRESHOLD"];
+      else process.env["JEV_INTENT_THRESHOLD"] = originalThreshold;
+    }
   });
 });

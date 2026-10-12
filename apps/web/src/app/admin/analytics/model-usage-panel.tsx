@@ -114,7 +114,7 @@ export function ModelUsagePanel({ range }: { range: UsageRange }) {
           label="估算成本"
           value={
             data.totals.estimatedCostCny === null
-              ? "用量不完整"
+              ? "成本估算不完整"
               : `¥${data.totals.estimatedCostCny.toFixed(4)}`
           }
         />
@@ -122,8 +122,8 @@ export function ModelUsagePanel({ range }: { range: UsageRange }) {
 
       {data.totals.unknownUsageCount > 0 ? (
         <p className="rounded-md bg-warning-bg px-3 py-2 text-xs text-warning" role="status">
-          有 {data.totals.unknownUsageCount} 次调用未返回完整 Token
-          或费率信息，这些调用不计入成本估算。
+          有 {data.totals.unknownUsageCount}{" "}
+          次调用的用量或标准价估算不完整，这些调用不计入成本估算。
         </p>
       ) : null}
 
