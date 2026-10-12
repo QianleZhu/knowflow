@@ -37,6 +37,8 @@ export type AgentChatLayoutProps = {
   emptyStateTitle: string;
   emptyStateDescription: string;
   chatHook: ReturnType<typeof useAgentChat>;
+  // 按聊天上下文隔离本地记录的最近会话 ID。
+  conversationStorageKey: string | null;
 };
 
 // 组合会话导航、聊天消息、运行记录与发送/停止输入区。
@@ -55,6 +57,7 @@ export function AgentChatLayout({
   emptyStateTitle,
   emptyStateDescription,
   chatHook,
+  conversationStorageKey,
 }: AgentChatLayoutProps) {
   const [processingId, setProcessingId] = useState<string | null>(null);
   const [toast, setToast] = useState<{ message: string; tone: "success" | "danger" } | null>(null);
@@ -62,6 +65,7 @@ export function AgentChatLayout({
   const [traceLoadError, setTraceLoadError] = useState<string | null>(null);
   const [openedTraceId, setOpenedTraceId] = useState<string | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const restoredConversationStorageKeysRef = useRef(new Set<string>());
 
   const showToast = useCallback((message: string, tone: "success" | "danger" = "success") => {
     setToast({ message, tone });
@@ -78,6 +82,8 @@ export function AgentChatLayout({
     setQuestion,
     statusText,
     isAsking,
+    canResumeRun,
+    resumeRun,
     feedbackByMessageId,
     correctionFor,
     setCorrectionFor,
@@ -88,6 +94,50 @@ export function AgentChatLayout({
     regenerate,
     setError,
   } = chatHook;
+
+  // 等会话列表加载完成后恢复上次选中的会话，并校验该 ID 仍属于当前用户可见列表。
+  useEffect(() => {
+    if (conversationStorageKey === null || isLoading) return;
+    const restoredKeys = restoredConversationStorageKeysRef.current;
+    if (restoredKeys.has(conversationStorageKey)) return;
+    restoredKeys.add(conversationStorageKey);
+    if (selectedConversationId !== "") return;
+
+    let storedConversationId: string | null = null;
+    try {
+      storedConversationId = window.localStorage.getItem(conversationStorageKey);
+    } catch {
+      // 浏览器禁用本地存储时仍可正常使用聊天，只是不记住最近会话。
+      return;
+    }
+
+    const storedConversation = conversations.find(({ id }) => id === storedConversationId);
+    // 服务端按最近更新时间倒序返回列表；没有有效历史选择时，默认打开最新会话。
+    const conversationToSelect = storedConversation ?? conversations[0];
+    if (conversationToSelect !== undefined) setSelectedConversationId(conversationToSelect.id);
+  }, [
+    conversationStorageKey,
+    conversations,
+    isLoading,
+    selectedConversationId,
+    setSelectedConversationId,
+  ]);
+
+  // 只保存当前已加载列表中的会话，避免切换 Agent 时把旧会话 ID 写入新上下文。
+  useEffect(() => {
+    if (
+      conversationStorageKey === null ||
+      selectedConversationId === "" ||
+      !conversations.some(({ id }) => id === selectedConversationId)
+    ) {
+      return;
+    }
+    try {
+      window.localStorage.setItem(conversationStorageKey, selectedConversationId);
+    } catch {
+      // 本地存储不可用时跳过持久化，不阻断会话操作。
+    }
+  }, [conversationStorageKey, conversations, selectedConversationId]);
 
   const traceByAnswerId = new Map(
     traceSummaries
@@ -332,9 +382,22 @@ export function AgentChatLayout({
         <div className="min-h-0 flex-1 overflow-y-auto">
           <div className="mx-auto flex max-w-3xl flex-col gap-6 px-6 py-6">
             {error !== null ? (
-              <p className="rounded-md bg-danger-bg px-4 py-3 text-sm text-danger" role="alert">
-                {error}
-              </p>
+              <div
+                className="flex flex-wrap items-center justify-between gap-3 rounded-md bg-danger-bg px-4 py-3 text-sm text-danger"
+                role="alert"
+              >
+                <span>{error}</span>
+                {canResumeRun ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => void resumeRun()}
+                  >
+                    恢复连接
+                  </Button>
+                ) : null}
+              </div>
             ) : null}
             {traceLoadError !== null ? (
               <p className="rounded-md bg-warning-bg px-4 py-2 text-xs text-warning" role="status">

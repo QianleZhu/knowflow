@@ -12,6 +12,16 @@ import {
   type ConversationSummaryJobResult,
 } from "./modules/domains/agent/conversation-summary-queue.js";
 import { processConversationSummary } from "./modules/domains/agent/conversation-summary-processor.js";
+import { AgentRunService } from "./modules/domains/agent/agent-run.service.js";
+import {
+  AGENT_RUN_CLEANUP_JOB,
+  AGENT_RUN_EXECUTE_JOB,
+  AGENT_RUN_QUEUE_NAME,
+  createAgentRunQueue,
+  type AgentRunJob,
+  type AgentRunJobName,
+  type AgentRunJobResult,
+} from "./modules/domains/agent/agent-run-queue.js";
 import {
   DOCUMENT_QUEUE_NAME,
   type DocumentProcessJob,
@@ -43,6 +53,7 @@ import { getRedisConnectionOptions } from "./shared/redis/redis-connection.js";
 const app = await NestFactory.createApplicationContext(AppModule);
 const llm = app.get(AliyunLlmService);
 const improvementService = app.get(KnowledgeImprovementService);
+const agentRunService = app.get(AgentRunService);
 
 const documentWorker = new Worker<DocumentQueueJob, DocumentQueueResult, DocumentJobName>(
   DOCUMENT_QUEUE_NAME,
@@ -110,6 +121,34 @@ const conversationSummaryWorker = new Worker<
   },
 );
 
+const agentRunQueue = createAgentRunQueue();
+await agentRunQueue.add(
+  AGENT_RUN_CLEANUP_JOB,
+  {},
+  {
+    repeat: { pattern: "0 3 * * *" },
+    jobId: "agent-run-expiry-cleanup",
+    removeOnComplete: { count: 24 },
+    removeOnFail: { count: 24 },
+  },
+);
+await agentRunQueue.close();
+
+const agentRunWorker = new Worker<AgentRunJob, AgentRunJobResult, AgentRunJobName>(
+  AGENT_RUN_QUEUE_NAME,
+  async (job) => {
+    if (job.name === AGENT_RUN_EXECUTE_JOB) {
+      return agentRunService.processRun((job.data as { runId: string }).runId);
+    }
+    await agentRunService.pruneExpiredRuns();
+    return { status: "completed" };
+  },
+  {
+    connection: getRedisConnectionOptions(),
+    concurrency: 4,
+  },
+);
+
 documentWorker.on("completed", (job) => {
   console.log(`completed ${job.queueName}/${job.name}/${job.id ?? "unknown"}`);
 });
@@ -123,7 +162,10 @@ improvementWorker.on("completed", (job) => {
 });
 
 improvementWorker.on("failed", (job, error) => {
-  console.error(`failed ${job?.queueName ?? IMPROVEMENT_QUEUE_NAME}/${job?.id ?? "unknown"}`, error);
+  console.error(
+    `failed ${job?.queueName ?? IMPROVEMENT_QUEUE_NAME}/${job?.id ?? "unknown"}`,
+    error,
+  );
 });
 
 conversationSummaryWorker.on("completed", (job) => {
@@ -137,11 +179,20 @@ conversationSummaryWorker.on("failed", (job, error) => {
   );
 });
 
+agentRunWorker.on("completed", (job) => {
+  console.log(`completed ${job.queueName}/${job.name}/${job.id ?? "unknown"}`);
+});
+
+agentRunWorker.on("failed", (job, error) => {
+  console.error(`failed ${job?.queueName ?? AGENT_RUN_QUEUE_NAME}/${job?.id ?? "unknown"}`, error);
+});
+
 process.on("SIGTERM", () => {
   void Promise.all([
     documentWorker.close(),
     improvementWorker.close(),
     conversationSummaryWorker.close(),
+    agentRunWorker.close(),
     app.close(),
   ]).then(() => process.exit(0));
 });
@@ -151,6 +202,7 @@ process.on("SIGINT", () => {
     documentWorker.close(),
     improvementWorker.close(),
     conversationSummaryWorker.close(),
+    agentRunWorker.close(),
     app.close(),
   ]).then(() => process.exit(0));
 });

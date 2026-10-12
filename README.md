@@ -161,7 +161,7 @@ pnpm dev:all
 
 默认登录使用 `.env` 中的 `SEED_ADMIN_USER` / `SEED_ADMIN_PASSWORD`。seed 还会创建部门管理员、普通用户、默认部门、演示知识库骨架、模型供应商与用途映射。
 
-> 注意：`pnpm dev:all` 会同时启动 api、web、worker。Worker 是文档处理、知识自动提炼、定时扫描、对话摘要的执行进程。只运行 `pnpm dev` 会启动 api + web，但不会启动 worker。
+> 注意：`pnpm dev:all` 会同时启动 api、web、worker。Worker 负责文档处理、知识自动提炼、定时扫描、对话摘要和独立 Agent 运行。只运行 `pnpm dev` 会启动 api + web，但不会启动 worker；此时新问题会以可恢复的排队状态保留，直到 Worker 启动。
 
 **质量检查**
 
@@ -212,7 +212,7 @@ apps/api/src/modules                  NestJS 领域模块
       ├── analytics/                  使用热度统计
       └── health/                     健康检查
 
-apps/api/src/worker.ts                Worker 入口：文档处理、知识提炼、定时扫描、对话摘要
+apps/api/src/worker.ts                Worker 入口：文档处理、知识提炼、定时扫描、对话摘要、Agent 运行
 apps/api/src/scripts/                 维护脚本
 apps/api/src/shared/                  后端共享工具（decorators、guards、filters）
 

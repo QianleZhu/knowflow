@@ -101,6 +101,11 @@ export default function ChatPage() {
       showArchive={true}
       emptyStateTitle="开始一段对话"
       emptyStateDescription="向全局助手提问,它会在你有权访问的全部知识库中查找依据并给出带来源的回答。"
+      conversationStorageKey={
+        globalAgentId === ""
+          ? null
+          : `knowflow:last-selected-conversation:global:${globalAgentId}`
+      }
       chatHook={chatHook}
     />
   );

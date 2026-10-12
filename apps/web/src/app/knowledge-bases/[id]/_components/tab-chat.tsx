@@ -26,7 +26,9 @@ export function TabChat({ knowledgeBaseId }: { knowledgeBaseId: string }) {
   const [loadingAgents, setLoadingAgents] = useState(true);
   const [loadingConversations, setLoadingConversations] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const lastSelectedAgentStorageKey = `knowflow:last-selected-agent:knowledge-base:${knowledgeBaseId}`;
 
+  // 初始化专家列表时优先恢复上次使用的 Agent，后续才能找回该 Agent 下的会话。
   useEffect(() => {
     async function loadAgents() {
       setLoadingAgents(true);
@@ -42,9 +44,17 @@ export function TabChat({ knowledgeBaseId }: { knowledgeBaseId: string }) {
         setAgents(response.items);
         if (response.items.length > 0) {
           const defaultAgent = response.items.find((a: Agent) => a.isDefault) ?? response.items[0];
-          if (defaultAgent) {
-            setSelectedAgentId(defaultAgent.id);
+          let lastSelectedAgentId: string | null = null;
+          try {
+            lastSelectedAgentId = window.localStorage.getItem(lastSelectedAgentStorageKey);
+          } catch {
+            // 浏览器禁用本地存储时回退到默认 Agent。
           }
+          const lastSelectedAgent = response.items.find(
+            (agent) => agent.id === lastSelectedAgentId,
+          );
+          const agentToSelect = lastSelectedAgent ?? defaultAgent;
+          if (agentToSelect) setSelectedAgentId(agentToSelect.id);
         }
       } catch (err) {
         setError(err instanceof Error ? err.message : "加载专家 Agent 失败");
@@ -53,7 +63,17 @@ export function TabChat({ knowledgeBaseId }: { knowledgeBaseId: string }) {
       }
     }
     void loadAgents();
-  }, [knowledgeBaseId]);
+  }, [knowledgeBaseId, lastSelectedAgentStorageKey]);
+
+  // 记住当前知识库内选择的 Agent，刷新后用它恢复对应会话列表。
+  useEffect(() => {
+    if (selectedAgentId === "") return;
+    try {
+      window.localStorage.setItem(lastSelectedAgentStorageKey, selectedAgentId);
+    } catch {
+      // 本地存储不可用时仍允许正常切换 Agent。
+    }
+  }, [lastSelectedAgentStorageKey, selectedAgentId]);
 
   const refreshConversations = useCallback(
     async (status: "active" | "archived") => {
@@ -114,6 +134,8 @@ export function TabChat({ knowledgeBaseId }: { knowledgeBaseId: string }) {
     <Select
       value={selectedAgentId === "" ? undefined : selectedAgentId}
       onValueChange={(next) => {
+        // 先标记列表正在切换，避免用旧 Agent 的会话恢复新 Agent 的选择。
+        setLoadingConversations(true);
         setSelectedAgentId(next);
         chatHook.setSelectedConversationId("");
         chatHook.setMessages([]);
@@ -151,6 +173,11 @@ export function TabChat({ knowledgeBaseId }: { knowledgeBaseId: string }) {
         agents.length === 0
           ? "请联系管理员在「专家 Agent 管理」标签页创建并发布。"
           : "该专家 Agent 熟知本知识库内容，向它提问吧。"
+      }
+      conversationStorageKey={
+        selectedAgentId === ""
+          ? null
+          : `knowflow:last-selected-conversation:knowledge-base:${knowledgeBaseId}:agent:${selectedAgentId}`
       }
       chatHook={chatHook}
     />

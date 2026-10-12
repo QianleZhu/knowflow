@@ -312,10 +312,7 @@ export function AssistantBubble({
                     className="min-w-0 rounded-lg border border-border bg-neutral-0 px-3 py-2.5"
                   >
                     <div className="flex min-w-0 items-start gap-2">
-                      <BookOpenText
-                        className="mt-0.5 size-4 shrink-0 text-brand-600"
-                        aria-hidden
-                      />
+                      <BookOpenText className="mt-0.5 size-4 shrink-0 text-brand-600" aria-hidden />
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-sm font-medium text-ink">{source.title}</p>
                         <p className="mt-0.5 truncate text-xs text-ink-subtle">
@@ -340,9 +337,19 @@ export function AssistantBubble({
           {isPartialAnswer ? (
             <p className="mt-2 text-xs text-warning" role="status">
               {message.completionState === "cancelled"
-                ? "已停止生成；这段未完成内容暂未保存到会话历史。"
-                : "回答连接中断；这段未完成内容暂未保存到会话历史。"}
+                ? "已停止生成；已输出内容保存在运行记录中。"
+                : "生成未完成；已输出内容保存在运行记录中。"}
             </p>
+          ) : null}
+
+          {isPartialAnswer ? (
+            <div className="mt-2 flex items-center gap-1">
+              <IconAction
+                label="复制部分内容"
+                onClick={() => void navigator.clipboard.writeText(message.content)}
+              />
+              <IconAction label="重新提问" onClick={() => onRegenerate()} />
+            </div>
           ) : null}
 
           {/* 操作按钮 */}

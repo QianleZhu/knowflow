@@ -895,7 +895,27 @@ export const agentTracePayloadResponseSchema = z.object({
 
 export const askMessageRequestSchema = z.object({
   content: z.string().trim().min(1).max(8000),
+  clientRequestId: z.uuid(),
 });
+
+export const agentRunStatusSchema = z.enum([
+  "queued",
+  "running",
+  "cancel_requested",
+  "completed",
+  "failed",
+  "cancelled",
+]);
+
+export const agentRunErrorCodeSchema = z.enum([
+  "authentication_required",
+  "permission_denied",
+  "rate_limited",
+  "service_unavailable",
+  "worker_interrupted",
+  "generation_failed",
+  "cancelled",
+]);
 
 export const askStreamEventSchema = z.discriminatedUnion("type", [
   z.object({
@@ -926,6 +946,54 @@ export const askStreamEventSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("agent.failed"),
     message: z.string(),
+    code: agentRunErrorCodeSchema.optional(),
+  }),
+  z.object({
+    type: z.literal("agent.cancelled"),
+    message: z.string(),
+  }),
+]);
+
+export const agentRunSnapshotSchema = z.object({
+  id: z.uuid(),
+  conversationId: z.uuid(),
+  userMessageId: z.uuid(),
+  assistantMessageId: z.uuid().nullable(),
+  clientRequestId: z.uuid(),
+  status: agentRunStatusSchema,
+  lastSequence: z.number().int().nonnegative(),
+  checkpointSequence: z.number().int().nonnegative(),
+  minSequence: z.number().int().positive(),
+  answer: z.string(),
+  errorCode: agentRunErrorCodeSchema.nullable(),
+  errorMessage: z.string().nullable(),
+  assistantMessage: conversationMessageSchema.nullable(),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
+  expiresAt: z.iso.datetime(),
+});
+
+export const agentRunListResponseSchema = z.object({
+  items: z.array(agentRunSnapshotSchema),
+});
+
+export const agentRunRouteParamsSchema = z.object({ runId: z.uuid() });
+export const agentRunRequestParamsSchema = z.object({ clientRequestId: z.uuid() });
+export const agentRunEventsQuerySchema = z.object({
+  afterSequence: z.coerce.number().int().nonnegative().default(0),
+});
+
+export const agentRunEventEnvelopeSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("event"),
+    runId: z.uuid(),
+    sequence: z.number().int().positive(),
+    event: askStreamEventSchema,
+  }),
+  z.object({
+    type: z.literal("snapshot_required"),
+    runId: z.uuid(),
+    minSequence: z.number().int().positive(),
   }),
 ]);
 
@@ -1224,6 +1292,11 @@ export type AgentTraceDetailResponse = z.infer<typeof agentTraceDetailResponseSc
 export type AgentTracePayloadResponse = z.infer<typeof agentTracePayloadResponseSchema>;
 export type AskMessageRequest = z.infer<typeof askMessageRequestSchema>;
 export type AskStreamEvent = z.infer<typeof askStreamEventSchema>;
+export type AgentRunStatus = z.infer<typeof agentRunStatusSchema>;
+export type AgentRunErrorCode = z.infer<typeof agentRunErrorCodeSchema>;
+export type AgentRunSnapshot = z.infer<typeof agentRunSnapshotSchema>;
+export type AgentRunListResponse = z.infer<typeof agentRunListResponseSchema>;
+export type AgentRunEventEnvelope = z.infer<typeof agentRunEventEnvelopeSchema>;
 export type ConfidenceLevel = z.infer<typeof confidenceLevelSchema>;
 export type NoAnswerType = z.infer<typeof noAnswerTypeSchema>;
 export type FeedbackRating = z.infer<typeof feedbackRatingSchema>;

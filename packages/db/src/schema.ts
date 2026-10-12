@@ -769,6 +769,42 @@ export const conversationMessages = pgTable(
   (table) => [index("conversation_messages_conversation_idx").on(table.conversationId)],
 );
 
+// 保存与 HTTP 订阅解耦的 Agent 运行状态、幂等请求键和可恢复答案快照。
+export const agentRuns = pgTable(
+  "agent_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+    userMessageId: uuid("user_message_id")
+      .notNull()
+      .references(() => conversationMessages.id, { onDelete: "cascade" }),
+    assistantMessageId: uuid("assistant_message_id").references(() => conversationMessages.id, {
+      onDelete: "set null",
+    }),
+    clientRequestId: uuid("client_request_id").notNull(),
+    requestHash: varchar("request_hash", { length: 64 }).notNull(),
+    status: varchar("status", { length: 24 }).default("queued").notNull(),
+    answerSnapshot: text("answer_snapshot").default("").notNull(),
+    lastSequence: integer("last_sequence").default(0).notNull(),
+    checkpointSequence: integer("checkpoint_sequence").default(0).notNull(),
+    errorCode: varchar("error_code", { length: 48 }),
+    errorMessage: text("error_message"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    ...timestamps(),
+  },
+  (table) => [
+    uniqueIndex("agent_runs_user_request_uidx").on(table.userId, table.clientRequestId),
+    index("agent_runs_conversation_created_idx").on(table.conversationId, table.createdAt),
+    index("agent_runs_status_updated_idx").on(table.status, table.updatedAt),
+    index("agent_runs_expiry_idx").on(table.expiresAt),
+  ],
+);
+
 export const answerFeedback = pgTable(
   "answer_feedback",
   {
@@ -873,10 +909,9 @@ export const agentRuntimeTraceSpans = pgTable(
     traceId: uuid("trace_id")
       .notNull()
       .references(() => agentRuntimeTraces.id, { onDelete: "cascade" }),
-    parentSpanId: uuid("parent_span_id").references(
-      (): AnyPgColumn => agentRuntimeTraceSpans.id,
-      { onDelete: "cascade" },
-    ),
+    parentSpanId: uuid("parent_span_id").references((): AnyPgColumn => agentRuntimeTraceSpans.id, {
+      onDelete: "cascade",
+    }),
     sequence: integer("sequence").notNull(),
     name: varchar("name", { length: 120 }).notNull(),
     kind: varchar("kind", { length: 40 }).notNull(),
@@ -894,10 +929,7 @@ export const agentRuntimeTraceSpans = pgTable(
     ...createdOnly(),
   },
   (table) => [
-    uniqueIndex("agent_runtime_trace_spans_trace_sequence_uidx").on(
-      table.traceId,
-      table.sequence,
-    ),
+    uniqueIndex("agent_runtime_trace_spans_trace_sequence_uidx").on(table.traceId, table.sequence),
     index("agent_runtime_trace_spans_parent_idx").on(table.parentSpanId),
     index("agent_runtime_trace_spans_model_created_idx").on(table.model, table.createdAt),
   ],

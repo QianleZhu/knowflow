@@ -385,13 +385,21 @@ export class AgentService {
     return { spanId, payloads: payloadRows };
   }
 
-  // 执行一次 Agent 问答，并在连接中断时取消未完成的下游工作。
+  // 校验创建运行所需的会话归属和 Agent 使用权限，工作线程执行时仍会再次校验。
+  async authorizeAsk(conversationId: string, user: AuthenticatedUser): Promise<void> {
+    const conversation = await this.findConversationForUser(conversationId, user);
+    const agent = await this.findAgentRow(conversation.agentId);
+    await this.ensureCanUseAgent(agent, user);
+  }
+
+  // 执行一次 Agent 问答；任务已独立入队时复用其事务内创建的用户消息。
   async ask(input: {
     conversationId: string;
     content: string;
     user: AuthenticatedUser;
     emit: SseEmitter;
     signal?: AbortSignal;
+    userMessageId?: string;
   }): Promise<ConversationMessage> {
     //链路前校验流程
     const conversation = await this.findConversationForUser(input.conversationId, input.user);
@@ -399,21 +407,36 @@ export class AgentService {
     await this.ensureCanUseAgent(agent, input.user);
     const startedAt = Date.now();
 
-    const [userMessage] = await db
-      .insert(conversationMessages)
-      .values({
-        conversationId: conversation.id,
-        role: "user",
-        content: input.content,
-      })
-      .returning({ id: conversationMessages.id });
-    if (userMessage === undefined) {
-      throw new BadRequestException("创建用户消息失败");
+    let userMessageId = input.userMessageId;
+    if (userMessageId === undefined) {
+      const [userMessage] = await db
+        .insert(conversationMessages)
+        .values({
+          conversationId: conversation.id,
+          role: "user",
+          content: input.content,
+        })
+        .returning({ id: conversationMessages.id });
+      userMessageId = userMessage?.id;
+    } else {
+      const [userMessage] = await db
+        .select({ id: conversationMessages.id })
+        .from(conversationMessages)
+        .where(
+          and(
+            eq(conversationMessages.id, userMessageId),
+            eq(conversationMessages.conversationId, conversation.id),
+            eq(conversationMessages.role, "user"),
+          ),
+        )
+        .limit(1);
+      if (userMessage === undefined) userMessageId = undefined;
     }
+    if (userMessageId === undefined) throw new BadRequestException("创建用户消息失败");
     const traceCollector = new AgentTraceCollector({ startedAt: new Date(startedAt) });
     traceCollector.root.addPayload("request", {
       conversationId: conversation.id,
-      userMessageId: userMessage.id,
+      userMessageId,
       agentId: agent.id,
       query: input.content,
     });
@@ -429,18 +452,18 @@ export class AgentService {
         sessionId: conversation.id,
         metadata: {
           conversationId: conversation.id,
-          messageId: userMessage.id,
+          messageId: userMessageId,
         },
       });
       await input.emit({
         type: "agent.started",
         conversationId: conversation.id,
-        userMessageId: userMessage.id,
+        userMessageId,
       });
       const initialState: AgentState = {
         user: input.user,
         conversation: this.toConversation(conversation),
-        userMessageId: userMessage.id,
+        userMessageId,
         query: input.content,
         agent: null,
         knowledgeScope: [],
@@ -496,7 +519,9 @@ export class AgentService {
       ? await db
           .select({ id: knowledgeBases.id })
           .from(knowledgeBases)
-          .where(and(eq(knowledgeBases.id, sourceKnowledgeBaseId), isNull(knowledgeBases.deletedAt)))
+          .where(
+            and(eq(knowledgeBases.id, sourceKnowledgeBaseId), isNull(knowledgeBases.deletedAt)),
+          )
           .limit(1)
       : [];
 
@@ -1893,10 +1918,7 @@ export class AgentService {
     };
   }
 
-  private toMessage(
-    row: MessageRow,
-    recommendedQuestions: string[] = [],
-  ): ConversationMessage {
+  private toMessage(row: MessageRow, recommendedQuestions: string[] = []): ConversationMessage {
     return {
       id: row.id,
       conversationId: row.conversationId,
