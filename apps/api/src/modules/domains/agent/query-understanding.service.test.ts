@@ -99,7 +99,8 @@ void describe("Jev intent classification", () => {
       const requestBody = JSON.parse(capturedRequestBody.value) as Record<string, unknown>;
       assert.deepEqual(result.probabilities, expectedProbabilities);
       assert.equal(result.model, "typesafe/jev-1.13-test");
-      assert.deepEqual(result.usage, { input_tokens: 80, output_tokens: 24 });
+      // SDK 的原始用量包含成本；分类服务应保留它，与 Trace 中记录的成本一致。
+      assert.deepEqual(result.usage, { input_tokens: 80, output_tokens: 24, cost: 0.00003 });
       assert.equal(requestBody["model"], "jev-1.13");
       assert.ok(requestBody["questions"]);
       assert.equal(JSON.stringify(requestBody).includes("accessibleKnowledgeBases"), false);
@@ -204,6 +205,67 @@ void describe("Jev intent classification", () => {
       assert.deepEqual(plan.intents, ["access_scope"]);
       assert.equal(plan.intentScores.document_catalog, 0.69);
       assert.equal(plan.trace.threshold, 0.7);
+    } finally {
+      if (originalThreshold === undefined) delete process.env["JEV_INTENT_THRESHOLD"];
+      else process.env["JEV_INTENT_THRESHOLD"] = originalThreshold;
+    }
+  });
+
+  // 模型认为指代不明时，较弱的任务标签不应触发猜测执行或混合拆分。
+  void it("routes dominant unclear independently and preserves conflicting scores", async () => {
+    const jev = new JevIntentStub();
+    jev.result.probabilities = probabilities({
+      knowledge_qa: 0.71,
+      conversation_transform: 0.65,
+      unclear: 0.87,
+    });
+    const plan = await new QueryUnderstandingService(jev).understand({
+      ...input("那什么时候到期？"),
+      recentMessages: [],
+    });
+    assert.deepEqual(plan.intents, ["unclear"]);
+    assert.equal(plan.isMixed, false);
+    assert.equal(plan.needsRetrieval, true);
+    assert.equal(plan.intentScores.knowledge_qa, 0.71);
+    assert.equal(plan.trace.reason, "jev_unclear_dominant");
+    assert.equal(jev.calls, 1);
+  });
+
+  // 独立概率可能同时偏高；明确任务占优时保留任务，同分则采用保守检索。
+  void it("keeps stronger clear tasks but chooses unclear on equal scores", async () => {
+    const jev = new JevIntentStub();
+    const service = new QueryUnderstandingService(jev);
+    jev.result.probabilities = probabilities({
+      access_scope: 0.95,
+      document_catalog: 0.85,
+      unclear: 0.7,
+    });
+    const clearPlan = await service.understand(input("列出我可访问的库和文档"));
+    assert.deepEqual(clearPlan.intents, ["document_catalog", "access_scope"]);
+    assert.equal(clearPlan.isMixed, true);
+    assert.equal(clearPlan.needsRetrieval, false);
+    jev.result.probabilities = probabilities({ access_scope: 0.8, unclear: 0.8 });
+    const tiedPlan = await service.understand(input("它可以访问吗？"));
+    assert.deepEqual(tiedPlan.intents, ["unclear"]);
+    assert.equal(tiedPlan.isMixed, false);
+  });
+
+  // 阈值同样约束 unclear；无标签达到阈值时仍须区分安全降级与模型明确判断。
+  void it("respects the threshold for unclear and traces the no-positive fallback", async () => {
+    const originalThreshold = process.env["JEV_INTENT_THRESHOLD"];
+    process.env["JEV_INTENT_THRESHOLD"] = "0.7";
+    const jev = new JevIntentStub();
+    jev.result.probabilities = probabilities({ knowledge_qa: 0.72, unclear: 0.69 });
+    try {
+      const service = new QueryUnderstandingService(jev);
+      const clearPlan = await service.understand(input());
+      assert.deepEqual(clearPlan.intents, ["knowledge_qa"]);
+      jev.result.probabilities = probabilities({ general_generation: 0.6, unclear: 0.69 });
+      const fallbackPlan = await service.understand(input("看看"));
+      assert.deepEqual(fallbackPlan.intents, ["unclear"]);
+      assert.equal(fallbackPlan.needsRetrieval, true);
+      assert.equal(fallbackPlan.trace.source, "jev");
+      assert.equal(fallbackPlan.trace.reason, "jev_no_positive_intent_safe_retrieval");
     } finally {
       if (originalThreshold === undefined) delete process.env["JEV_INTENT_THRESHOLD"];
       else process.env["JEV_INTENT_THRESHOLD"] = originalThreshold;

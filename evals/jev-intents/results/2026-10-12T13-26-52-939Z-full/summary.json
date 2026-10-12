@@ -1,0 +1,147 @@
+{
+  "createdAt": "2026-10-12T13:26:52.939Z",
+  "datasetVersion": "jev-multilabel-v2-regression-187",
+  "model": "jev-1.13",
+  "threshold": 0.5,
+  "concurrency": 2,
+  "endpoint": "https://openrouter.ai/api/v1/systemone",
+  "retries": 0,
+  "hashes": {
+    "dataset": "8c5581b55346b178d570b417085fc4e058cc8147f931278188d9accf3dbd756a",
+    "jev": "29716ff4095fcf3c07054f272c4d4d957b2deffd3988dc566af3f4a6a331084c",
+    "routing": "679a79a92825a6403981238b4f2a32913b66719c8496ffe13cec1638800b07d3",
+    "evaluator": "77ace79db912cf486aed2128b22b4971373167493bef1ed9f935d04938f18531"
+  },
+  "planned": 187,
+  "attempted": 187,
+  "successfulCalls": 187,
+  "infrastructureFailures": 0,
+  "scoredAttempts": 178,
+  "scoredSuccessful": 178,
+  "exactMatches": 112,
+  "exactMatchRate": 0.6292134831460674,
+  "perIntent": [
+    {
+      "intent": "knowledge_qa",
+      "support": 69,
+      "tp": 69,
+      "fp": 45,
+      "fn": 0,
+      "precision": 0.6052631578947368,
+      "recall": 1,
+      "f1": 0.7540983606557377
+    },
+    {
+      "intent": "document_catalog",
+      "support": 22,
+      "tp": 22,
+      "fp": 17,
+      "fn": 0,
+      "precision": 0.5641025641025641,
+      "recall": 1,
+      "f1": 0.7213114754098361
+    },
+    {
+      "intent": "access_scope",
+      "support": 19,
+      "tp": 19,
+      "fp": 3,
+      "fn": 0,
+      "precision": 0.8636363636363636,
+      "recall": 1,
+      "f1": 0.926829268292683
+    },
+    {
+      "intent": "assistant_capability",
+      "support": 16,
+      "tp": 16,
+      "fp": 10,
+      "fn": 0,
+      "precision": 0.6153846153846154,
+      "recall": 1,
+      "f1": 0.7619047619047619
+    },
+    {
+      "intent": "conversation_transform",
+      "support": 24,
+      "tp": 24,
+      "fp": 1,
+      "fn": 0,
+      "precision": 0.96,
+      "recall": 1,
+      "f1": 0.9795918367346939
+    },
+    {
+      "intent": "general_generation",
+      "support": 52,
+      "tp": 37,
+      "fp": 2,
+      "fn": 15,
+      "precision": 0.9487179487179487,
+      "recall": 0.7115384615384616,
+      "f1": 0.8131868131868132
+    },
+    {
+      "intent": "unclear",
+      "support": 13,
+      "tp": 6,
+      "fp": 10,
+      "fn": 7,
+      "precision": 0.375,
+      "recall": 0.46153846153846156,
+      "f1": 0.41379310344827586
+    }
+  ],
+  "micro": {
+    "tp": 193,
+    "fp": 88,
+    "fn": 22,
+    "precision": 0.6868327402135231,
+    "recall": 0.8976744186046511,
+    "f1": 0.7782258064516129
+  },
+  "macroF1": 0.7672450885189716,
+  "mixed": {
+    "tp": 27,
+    "fp": 33,
+    "fn": 5,
+    "precision": 0.45,
+    "recall": 0.84375,
+    "f1": 0.5869565217391305
+  },
+  "correctRetrievalDecisions": 126,
+  "retrievalDecisionAccuracy": 0.7078651685393258,
+  "meanLatencyMs": 1080.5935828877004,
+  "p95LatencyMs": 1650,
+  "tokens": {
+    "input": 240774,
+    "output": 23562
+  },
+  "suites": [
+    {
+      "suite": "legacy",
+      "scoredSuccessful": 115,
+      "exactMatches": 74
+    },
+    {
+      "suite": "diagnostic",
+      "scoredSuccessful": 0,
+      "exactMatches": 0
+    },
+    {
+      "suite": "single",
+      "scoredSuccessful": 31,
+      "exactMatches": 19
+    },
+    {
+      "suite": "mixed",
+      "scoredSuccessful": 20,
+      "exactMatches": 9
+    },
+    {
+      "suite": "context",
+      "scoredSuccessful": 12,
+      "exactMatches": 10
+    }
+  ]
+}

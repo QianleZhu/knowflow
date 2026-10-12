@@ -1,0 +1,15 @@
+{
+  "createdAt": "2026-10-12T13:26:52.939Z",
+  "datasetVersion": "jev-multilabel-v2-regression-187",
+  "model": "jev-1.13",
+  "threshold": 0.5,
+  "concurrency": 2,
+  "endpoint": "https://openrouter.ai/api/v1/systemone",
+  "retries": 0,
+  "hashes": {
+    "dataset": "8c5581b55346b178d570b417085fc4e058cc8147f931278188d9accf3dbd756a",
+    "jev": "29716ff4095fcf3c07054f272c4d4d957b2deffd3988dc566af3f4a6a331084c",
+    "routing": "679a79a92825a6403981238b4f2a32913b66719c8496ffe13cec1638800b07d3",
+    "evaluator": "77ace79db912cf486aed2128b22b4971373167493bef1ed9f935d04938f18531"
+  }
+}

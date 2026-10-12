@@ -1,0 +1,61 @@
+{
+  "input": {
+    "id": "c09",
+    "suite": "legacy",
+    "query": "能否查一下采购审批流程？",
+    "recentMessages": [],
+    "conversationSummary": null,
+    "expectedIntents": ["knowledge_qa"],
+    "note": "恢复旧题，按当前意图定义重新标注，旧路由结果不参与真值推导。"
+  },
+  "plan": {
+    "route": "retrieve",
+    "intents": ["knowledge_qa"],
+    "intentScores": {
+      "knowledge_qa": 0.96,
+      "document_catalog": 0.24,
+      "access_scope": 0.04,
+      "assistant_capability": 0.05,
+      "conversation_transform": 0.04,
+      "general_generation": 0.04,
+      "unclear": 0.2
+    },
+    "isMixed": false,
+    "needsRetrieval": true,
+    "answer": null,
+    "standaloneQuery": "能否查一下采购审批流程？",
+    "keywords": [],
+    "requestedKnowledgeBaseIds": [],
+    "trace": {
+      "version": "jev-multilabel-v1",
+      "mode": "jev",
+      "source": "jev",
+      "ruleId": null,
+      "reason": "jev_multilabel",
+      "classificationAttempts": 1,
+      "model": "typesafe/jev-1.13-20260917",
+      "threshold": 0.5,
+      "latencyMs": 2646
+    }
+  },
+  "classification": {
+    "model": "typesafe/jev-1.13-20260917",
+    "probabilities": {
+      "knowledge_qa": 0.96,
+      "document_catalog": 0.24,
+      "access_scope": 0.04,
+      "assistant_capability": 0.05,
+      "conversation_transform": 0.04,
+      "general_generation": 0.04,
+      "unclear": 0.2
+    },
+    "usage": {
+      "input_tokens": 1277,
+      "output_tokens": 126,
+      "cost": 0.000053634
+    }
+  },
+  "infrastructureError": null,
+  "exactMatch": true,
+  "elapsedMs": 2646
+}

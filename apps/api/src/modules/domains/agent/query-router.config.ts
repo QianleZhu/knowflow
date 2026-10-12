@@ -1,5 +1,5 @@
 // 意图分类由 Jev 多标签概率完成；整句规则仅保留兼容路由与授权目录映射。
-export const QUERY_ROUTER_VERSION = "jev-multilabel-v1";
+export const QUERY_ROUTER_VERSION = "jev-multilabel-v3";
 export const QUERY_ROUTES = [
   "social",
   "capability",

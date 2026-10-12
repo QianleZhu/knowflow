@@ -76,8 +76,17 @@ export class QueryUnderstandingService {
       (intent) =>
         intent !== "unclear" && intentScores[intent] !== null && intentScores[intent] >= threshold,
     );
-    const intents: QueryIntent[] = positiveIntents.length > 0 ? positiveIntents : ["unclear"];
-    const isMixed = positiveIntents.length > 1;
+    // unclear 与业务任务互斥：模型更倾向无法解析请求时，不让较弱业务标签触发猜测执行。
+    const unclearScore = intentScores.unclear;
+    const highestTaskScore = Math.max(
+      0,
+      ...positiveIntents.map((intent) => intentScores[intent] ?? 0),
+    );
+    const modelUnclear =
+      unclearScore !== null && unclearScore >= threshold && unclearScore >= highestTaskScore;
+    const intents: QueryIntent[] =
+      modelUnclear || positiveIntents.length === 0 ? ["unclear"] : positiveIntents;
+    const isMixed = intents.length > 1;
     const rule = matchIntentRule(input);
     const needsRetrieval =
       classification === null || intents.includes("knowledge_qa") || intents.includes("unclear");
@@ -101,7 +110,14 @@ export class QueryUnderstandingService {
         mode: "jev",
         source: classification === null ? "degraded" : "jev",
         ruleId: rule?.id ?? null,
-        reason: classification === null ? "jev_unavailable_safe_retrieval" : "jev_multilabel",
+        reason:
+          classification === null
+            ? "jev_unavailable_safe_retrieval"
+            : modelUnclear
+              ? "jev_unclear_dominant"
+              : positiveIntents.length === 0
+                ? "jev_no_positive_intent_safe_retrieval"
+                : "jev_multilabel",
         classificationAttempts: 1,
         model: classification?.model ?? null,
         threshold,

@@ -1,0 +1,137 @@
+{
+  "createdAt": "2026-10-12T13:25:44.516Z",
+  "datasetVersion": "jev-multilabel-v2-regression-187",
+  "model": "jev-1.13",
+  "threshold": 0.5,
+  "concurrency": 1,
+  "endpoint": "https://openrouter.ai/api/v1/systemone",
+  "retries": 0,
+  "hashes": {
+    "dataset": "8c5581b55346b178d570b417085fc4e058cc8147f931278188d9accf3dbd756a",
+    "jev": "29716ff4095fcf3c07054f272c4d4d957b2deffd3988dc566af3f4a6a331084c",
+    "routing": "679a79a92825a6403981238b4f2a32913b66719c8496ffe13cec1638800b07d3",
+    "evaluator": "94eb0ee15e9991ec0d77372087938d47bf87b10abdac14ce22e3aa83d0040c71"
+  },
+  "planned": 3,
+  "attempted": 3,
+  "successfulCalls": 3,
+  "infrastructureFailures": 0,
+  "scoredAttempts": 3,
+  "scoredSuccessful": 3,
+  "exactMatches": 3,
+  "exactMatchRate": 1,
+  "perIntent": [
+    {
+      "intent": "knowledge_qa",
+      "support": 2,
+      "tp": 2,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1,
+      "recall": 1,
+      "f1": 1
+    },
+    {
+      "intent": "document_catalog",
+      "support": 1,
+      "tp": 1,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1,
+      "recall": 1,
+      "f1": 1
+    },
+    {
+      "intent": "access_scope",
+      "support": 0,
+      "tp": 0,
+      "fp": 0,
+      "fn": 0,
+      "precision": null,
+      "recall": null,
+      "f1": null
+    },
+    {
+      "intent": "assistant_capability",
+      "support": 0,
+      "tp": 0,
+      "fp": 0,
+      "fn": 0,
+      "precision": null,
+      "recall": null,
+      "f1": null
+    },
+    {
+      "intent": "conversation_transform",
+      "support": 0,
+      "tp": 0,
+      "fp": 0,
+      "fn": 0,
+      "precision": null,
+      "recall": null,
+      "f1": null
+    },
+    {
+      "intent": "general_generation",
+      "support": 0,
+      "tp": 0,
+      "fp": 0,
+      "fn": 0,
+      "precision": null,
+      "recall": null,
+      "f1": null
+    },
+    {
+      "intent": "unclear",
+      "support": 1,
+      "tp": 1,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1,
+      "recall": 1,
+      "f1": 1
+    }
+  ],
+  "micro": {
+    "tp": 4,
+    "fp": 0,
+    "fn": 0,
+    "precision": 1,
+    "recall": 1,
+    "f1": 1
+  },
+  "macroF1": 1,
+  "mixed": {
+    "tp": 1,
+    "fp": 0,
+    "fn": 0,
+    "precision": 1,
+    "recall": 1,
+    "f1": 1
+  },
+  "correctRetrievalDecisions": 3,
+  "retrievalDecisionAccuracy": 1,
+  "meanLatencyMs": 1456.3333333333333,
+  "p95LatencyMs": 2646,
+  "tokens": {
+    "input": 3833,
+    "output": 378
+  },
+  "suites": [
+    {
+      "suite": "legacy",
+      "scoredSuccessful": 1,
+      "exactMatches": 1
+    },
+    {
+      "suite": "single",
+      "scoredSuccessful": 1,
+      "exactMatches": 1
+    },
+    {
+      "suite": "mixed",
+      "scoredSuccessful": 1,
+      "exactMatches": 1
+    }
+  ]
+}
