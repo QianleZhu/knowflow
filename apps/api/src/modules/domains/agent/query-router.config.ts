@@ -65,6 +65,10 @@ export const INTENT_RULES: IntentRule[] = [
 export const NAMED_CATALOG_PATTERN =
   /^(?:请)?(?:列出|展示|查看)(.{1,160}?(?:知识库|资料库|文档库|库))(?:的|中有哪些|里有哪些)(?:文档目录|资料清单|文档名称|文档标题|文件列表|文件)(?:不需要正文)?$/u;
 
+// 混合请求拆解失败时，从原始整句中保守定位目录操作提到的知识库名称。
+export const NAMED_CATALOG_TASK_PATTERN =
+  /(?:列出|展示|查看)(.{1,160}?(?:知识库|资料库|文档库|库))(?:的|中有哪些|里有哪些)(?:文档目录|资料清单|文档名称|文档标题|文件列表|文件)(?:不需要正文)?/u;
+
 // 仅统一空白与标点，不删除实际业务文字；无法完整匹配时保留给 LLM。
 export function normalizeIntentText(query: string): string {
   return query.trim().replace(/[\s，。！？、,!?;；.：:]/gu, "");

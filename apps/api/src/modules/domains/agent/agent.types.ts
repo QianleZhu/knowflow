@@ -13,6 +13,11 @@ import type { ChatRequestMessage, ChatTokenUsage } from "../../../shared/llm/ali
 import type { AccessibleKnowledgeBase } from "./agent-scope.js";
 import type { RecentConversationMessage } from "./agent-memory.js";
 import type { QueryPlan } from "./query-understanding.service.js";
+import type {
+  RouteTask,
+  RouteTaskPlanSource,
+  RouteTaskResult,
+} from "./route-tasks/route-task.types.js";
 
 export type SseEmitter = (event: AskStreamEvent) => Promise<void>;
 
@@ -45,6 +50,10 @@ export type AgentState = {
   recentMessages: RecentConversationMessage[];
   conversationSummary: string | null;
   queryPlan: QueryPlan | null;
+  // 保存分类后拆出的原子任务、操作结果和拆解方式，供图节点与回答汇总共享。
+  routeTasks: RouteTask[];
+  routeTaskResults: RouteTaskResult[];
+  routeTaskPlanSource: RouteTaskPlanSource | null;
   rewrittenQueries: string[];
   expandedKeywords: string[];
   retrieval: RetrievalResult | null;

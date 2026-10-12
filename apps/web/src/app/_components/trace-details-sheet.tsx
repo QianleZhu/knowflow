@@ -69,6 +69,7 @@ function getSpanLabel(name: string): string {
     resolve_knowledge_scope: "解析知识范围",
     parse_conversation_attachments: "加载会话上下文",
     analyze_query: "分析问题与路由",
+    execute_route_tasks: "执行意图任务",
     "model.jev.intent": "Jev 多意图分类",
     rewrite_query: "查询改写",
     retrieve_knowledge: "知识检索",
@@ -83,6 +84,13 @@ function getSpanLabel(name: string): string {
     "model.rerank": "重排模型",
     "model.chat.complete": "对话模型调用",
     "model.chat.stream": "答案生成模型",
+    "route_task.knowledge_qa": "知识问答任务",
+    "route_task.document_catalog": "文档目录任务",
+    "route_task.access_scope": "访问范围任务",
+    "route_task.assistant_capability": "助手能力任务",
+    "route_task.conversation_transform": "对话整理任务",
+    "route_task.general_generation": "通用生成任务",
+    "route_task.unclear": "待澄清任务",
   };
   return labels[name] ?? name;
 }

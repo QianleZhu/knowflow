@@ -548,15 +548,32 @@ void describe("AgentService conversation memory answer generation", () => {
     );
   });
 
-  void it("returns the decision model answer without invoking the answer model", async () => {
+  void it("returns deterministic route results without invoking the answer model", async () => {
     const llm = makeLlmStub("must not generate again");
     const service = serviceWithGeneration(llm);
     const state = {
       ...makeGenerationState({ retrievalContexts: [] }),
-      queryPlan: { ...makeQueryPlan("direct"), answer: "1. 核对材料。\n2. 提交申请。" },
+      queryPlan: makeQueryPlan("capability"),
+      routeTasks: [
+        {
+          id: "task-1-assistant_capability",
+          intent: "assistant_capability" as const,
+          query: "你能做什么",
+        },
+      ],
+      routeTaskResults: [
+        {
+          taskId: "task-1-assistant_capability",
+          intent: "assistant_capability" as const,
+          query: "你能做什么",
+          mode: "deterministic" as const,
+          status: "completed" as const,
+          content: "我可以查询你能访问的知识库。",
+        },
+      ],
     };
     const result = await service.generateAnswerStream(state);
-    assert.equal(result.answer, state.queryPlan.answer);
+    assert.equal(result.answer, "我可以查询你能访问的知识库。");
     assert.equal(llm.streamedMessages.length, 0);
     assert.equal(result.confidenceLevel, null);
     assert.equal(result.noAnswerType, null);
@@ -616,10 +633,10 @@ void describe("AgentService conversation memory answer generation", () => {
 
 // 运行真实 LangGraph 编排验证历史先加载与非检索分支，不把依赖替身当成端到端验收。
 void describe("AgentService query routing integration", () => {
-  void it("loads memory before analysis and skips retrieval/rerank for direct replies", async () => {
+  void it("loads memory before analysis and skips retrieval for deterministic route tasks", async () => {
     const service = makeService();
     const order: string[] = [];
-    const plan = makeQueryPlan("social");
+    const plan = makeQueryPlan("capability");
     Object.assign(service, {
       loadAgent: (state: AgentState) => Promise.resolve(state),
       checkAgentPermission: (state: AgentState) => Promise.resolve(state),
@@ -930,6 +947,9 @@ function makeGenerationState(
     recentMessages: options.recentMessages ?? [],
     conversationSummary: options.conversationSummary ?? null,
     queryPlan: null,
+    routeTasks: [],
+    routeTaskResults: [],
+    routeTaskPlanSource: null,
     rewrittenQueries: ["What did I ask before?"],
     expandedKeywords: ["previous", "question"],
     retrieval: {

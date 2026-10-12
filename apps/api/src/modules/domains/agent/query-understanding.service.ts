@@ -20,7 +20,7 @@ export type QueryUnderstandingInput = JevIntentRequest & {
   accessibleKnowledgeBases: AccessibleKnowledgeBase[];
 };
 
-// 业务操作尚未按意图拆分；route 保留给当前单路由执行图兼容使用。
+// route 保留给诊断与兼容字段使用，实际操作由独立 RouteTask 处理器执行。
 type PlanContent = {
   route: QueryRoute;
   intents: QueryIntent[];

@@ -388,6 +388,7 @@ export function useAgentChat({
         case "agent.step.started": {
           const stepLabels: Record<string, string> = {
             analyze_query: "理解问题中",
+            execute_route_tasks: "执行意图任务中",
             retrieve_knowledge: "检索知识库中",
             rerank_context: "整理相关内容中",
             build_context: "构建上下文中",
